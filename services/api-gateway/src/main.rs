@@ -2,10 +2,10 @@ use axum::{
     extract::{Path, State, Json},
     routing::{get, post},
     Router,
-    http::StatusCode,
+    http::{StatusCode, header, HeaderName, HeaderValue, Method},
     response::IntoResponse,
 };
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -574,6 +574,43 @@ async fn list_tools(State(state): State<AppState>) -> impl IntoResponse {
     Json(registry.list_tools())
 }
 
+/// Header the web-chat frontend sends to identify a session owner on credentialed requests.
+const SESSION_OWNER_TOKEN_HEADER: &str = "x-session-owner-token";
+
+/// Build a CORS layer that supports credentialed requests from the web-chat frontend.
+///
+/// The frontend issues requests with `credentials: include`, so the browser rejects a
+/// wildcard `Access-Control-Allow-Origin: *` and requires an explicit origin together with
+/// `Access-Control-Allow-Credentials: true`. Allowed origins default to the local trunk
+/// dev server and can be overridden via the `CORS_ALLOWED_ORIGINS` env var (comma-separated).
+fn build_cors_layer() -> CorsLayer {
+    let raw = std::env::var("CORS_ALLOWED_ORIGINS")
+        .unwrap_or_else(|_| "http://127.0.0.1:8081,http://localhost:8081".to_string());
+
+    let origins: Vec<HeaderValue> = raw
+        .split(',')
+        .map(|o| o.trim().trim_end_matches('/'))
+        .filter(|o| !o.is_empty())
+        .filter_map(|o| HeaderValue::from_str(o).ok())
+        .collect();
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods(AllowMethods::list([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ]))
+        .allow_headers(AllowHeaders::list([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            HeaderName::from_static(SESSION_OWNER_TOKEN_HEADER),
+        ]))
+        .allow_credentials(true)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env file
@@ -589,10 +626,11 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting pekko-agent API Gateway");
 
-    // Build LLM config from environment
+    // Build LLM config from environment.
+    // CLAUDE_API_KEY is optional: when LLM_PROVIDER is "openai" the Claude
+    // client is never used, so we fall back to an empty key instead of panicking.
     let llm_config = LlmConfig {
-        api_key: std::env::var("CLAUDE_API_KEY")
-            .expect("CLAUDE_API_KEY must be set in .env or environment"),
+        api_key: std::env::var("CLAUDE_API_KEY").unwrap_or_default(),
         model: std::env::var("CLAUDE_MODEL")
             .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string()),
         max_tokens: std::env::var("CLAUDE_MAX_TOKENS")
@@ -602,7 +640,7 @@ async fn main() -> anyhow::Result<()> {
         ..LlmConfig::default()
     };
 
-    info!(model = %llm_config.model, "LLM configured");
+    info!(model = %llm_config.model, "Claude client configured (used only when LLM_PROVIDER=claude)");
 
     // Create Claude client
     let claude_client = Arc::new(ClaudeClient::new(llm_config.clone()));
@@ -659,7 +697,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Determine LLM provider
     let llm_provider = std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "claude".to_string());
-    info!(provider = %llm_provider, "LLM provider selected");
+
+    // Resolve the model that will actually serve requests for the selected provider
+    let active_model = match llm_provider.as_str() {
+        "openai" => std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "(OPENAI_MODEL unset)".to_string()),
+        _ => llm_config.model.clone(),
+    };
+    info!(provider = %llm_provider, model = %active_model, "LLM provider selected");
 
     // Create OpenAI client if API key available
     let openai_client = std::env::var("OPENAI_API_KEY").ok().map(|key| {
@@ -697,7 +741,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/sessions/:session_id/history", get(get_session_history))
         .route("/api/sessions/:session_id/summarize", get(summarize_session))
         .route("/api/tools", get(list_tools))
-        .layer(CorsLayer::permissive())
+        .layer(build_cors_layer())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
