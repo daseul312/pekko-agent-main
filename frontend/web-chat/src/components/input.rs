@@ -6,12 +6,28 @@ use yew::prelude::*;
 pub struct InputProps {
     pub on_send: Callback<String>,
     pub disabled: bool,
+    #[prop_or_default]
+    pub focus_trigger: u32,
 }
 
 #[function_component(ChatInput)]
 pub fn chat_input(props: &InputProps) -> Html {
     let input_value = use_state(String::new);
     let textarea_ref = use_node_ref();
+
+    // Handle focus trigger
+    {
+        let textarea_ref = textarea_ref.clone();
+        let focus_trigger = props.focus_trigger;
+        use_effect_with(focus_trigger, move |_| {
+            if focus_trigger > 0 {
+                if let Some(el) = textarea_ref.cast::<web_sys::HtmlTextAreaElement>() {
+                    el.focus().ok();
+                }
+            }
+            || ()
+        });
+    }
 
     let on_input = {
         let input_value = input_value.clone();
@@ -40,7 +56,7 @@ pub fn chat_input(props: &InputProps) -> Html {
         let disabled = props.disabled;
         let textarea_ref = textarea_ref.clone();
         Callback::from(move |e: KeyboardEvent| {
-            if e.key() == "Enter" && !e.shift_key() && !disabled {
+            if e.key() == "Enter" && !e.shift_key() && !disabled && !e.is_composing() {
                 e.prevent_default();
                 let val = (*input_value).trim().to_string();
                 if !val.is_empty() {

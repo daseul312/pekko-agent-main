@@ -1,8 +1,9 @@
-use yew::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use wasm_bindgen::prelude::*;
-use crate::types::ChatSession;
+use yew::prelude::*;
+
+use crate::types::{AgentMeta, ChatSession, BOARD_POST_ANALYZING_AGENT_ID};
 
 #[wasm_bindgen]
 extern "C" {
@@ -18,12 +19,42 @@ struct ElementRect {
     height: f64,
 }
 
+fn session_agent_label(agents: &[AgentMeta], session: &ChatSession) -> String {
+    let candidate_ids: Vec<String> = if session.routed_agent_ids.is_empty() {
+        vec![session.agent_id.clone()]
+    } else {
+        session.routed_agent_ids.clone()
+    };
+
+    let labels: Vec<String> = candidate_ids
+        .iter()
+        .filter_map(|id| {
+            if id.as_str() == BOARD_POST_ANALYZING_AGENT_ID {
+                Some("분석 중".to_string())
+            } else {
+                agents
+                    .iter()
+                    .find(|agent| agent.id == *id)
+                    .map(|agent| agent.name.clone())
+            }
+        })
+        .collect();
+
+    if labels.is_empty() {
+        session.agent_id.clone()
+    } else {
+        labels.join(", ")
+    }
+}
+
 #[derive(Properties, PartialEq)]
 pub struct SidebarProps {
     pub sessions: Vec<ChatSession>,
+    pub agents: Vec<AgentMeta>,
     pub selected_session_id: Option<uuid::Uuid>,
     pub on_select_session: Callback<uuid::Uuid>,
     pub on_delete_session: Callback<uuid::Uuid>,
+    pub on_delete_all_sessions: Callback<()>,
     pub on_new_chat: Callback<()>,
     pub on_search_open: Callback<()>,
     pub on_pin_session: Callback<uuid::Uuid>,
@@ -40,9 +71,10 @@ pub fn sidebar(props: &SidebarProps) -> Html {
     {
         let dropdown_open_id = dropdown_open_id.clone();
         use_effect_with((), move |_| {
-            let listener = gloo_events::EventListener::new(&web_sys::window().unwrap(), "click", move |_| {
-                dropdown_open_id.set(None);
-            });
+            let listener =
+                gloo_events::EventListener::new(&web_sys::window().unwrap(), "click", move |_| {
+                    dropdown_open_id.set(None);
+                });
             move || drop(listener)
         });
     }
@@ -56,6 +88,8 @@ pub fn sidebar(props: &SidebarProps) -> Html {
         }
     });
 
+    let has_sessions = !sorted_sessions.is_empty();
+
     let health_class = match props.health_status.as_deref() {
         Some("healthy") => "healthy",
         Some(_) => "unhealthy",
@@ -67,10 +101,23 @@ pub fn sidebar(props: &SidebarProps) -> Html {
         None => "연결 확인 중...",
     };
 
+    let on_delete_all_sessions = {
+        let cb = props.on_delete_all_sessions.clone();
+        Callback::from(move |e: MouseEvent| {
+            e.stop_propagation();
+            if has_sessions {
+                cb.emit(())
+            }
+        })
+    };
+
     html! {
         <div class="sidebar">
             // ── Header ──
-            <div class="sidebar-header">
+            <div class="sidebar-header" onclick={
+                let cb = props.on_new_chat.clone();
+                Callback::from(move |_: MouseEvent| cb.emit(()))
+            }>
                 <h1>
                     <span class="dot"></span>
                     { "Core Agentic AI" }
@@ -92,14 +139,23 @@ pub fn sidebar(props: &SidebarProps) -> Html {
             <div class="sidebar-section" style="flex: 1; overflow-y: auto;">
                 <div class="sidebar-section-title" style="display: flex; justify-content: space-between; align-items: center;">
                     { "대화 기록" }
-                    <div class="search-trigger" onclick={
-                        let cb = props.on_search_open.clone();
-                        Callback::from(move |e: MouseEvent| {
-                            e.stop_propagation();
-                            cb.emit(())
-                        })
-                    }>
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                    <div class="history-actions">
+                        <div class="search-trigger" onclick={
+                            let cb = props.on_search_open.clone();
+                            Callback::from(move |e: MouseEvent| {
+                                e.stop_propagation();
+                                cb.emit(())
+                            })
+                        }>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                        </div>
+                        <div
+                            class={classes!("search-trigger", "delete-trigger", (!has_sessions).then_some("disabled"))}
+                            onclick={on_delete_all_sessions}
+                            title="대화 전체 삭제"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                        </div>
                     </div>
                 </div>
                 { if sorted_sessions.is_empty() {
@@ -119,7 +175,7 @@ pub fn sidebar(props: &SidebarProps) -> Html {
                                         cb.emit(session_id);
                                     })
                                 };
-                                
+
                                 let on_more_click = {
                                     let dropdown_open_id = dropdown_open_id.clone();
                                     let dropdown_pos = dropdown_pos.clone();
@@ -128,17 +184,15 @@ pub fn sidebar(props: &SidebarProps) -> Html {
                                         e.stop_propagation();
                                         if *dropdown_open_id == Some(session_id) {
                                             dropdown_open_id.set(None);
-                                        } else {
-                                            if let Some(json) = get_element_rect(&target_id) {
-                                                if let Ok(rect) = serde_json::from_str::<ElementRect>(&json) {
-                                                    dropdown_pos.set((rect.top + rect.height + 4.0, rect.left));
-                                                    dropdown_open_id.set(Some(session_id));
-                                                }
+                                        } else if let Some(json) = get_element_rect(&target_id) {
+                                            if let Ok(rect) = serde_json::from_str::<ElementRect>(&json) {
+                                                dropdown_pos.set((rect.top + rect.height + 4.0, rect.left));
+                                                dropdown_open_id.set(Some(session_id));
                                             }
                                         }
                                     })
                                 };
-                                
+
                                 let on_pin = {
                                     let cb = props.on_pin_session.clone();
                                     Callback::from(move |e: MouseEvent| {
@@ -146,7 +200,7 @@ pub fn sidebar(props: &SidebarProps) -> Html {
                                         cb.emit(session_id);
                                     })
                                 };
-                                
+
                                 let on_rename = {
                                     let cb = props.on_rename_click.clone();
                                     Callback::from(move |e: MouseEvent| {
@@ -162,16 +216,11 @@ pub fn sidebar(props: &SidebarProps) -> Html {
                                         cb.emit(session_id);
                                     })
                                 };
-                                
-                                let agent_name = match session.agent_id.as_str() {
-                                    "ehs-permit-agent" => "허가 관리",
-                                    "ehs-inspection-agent" => "점검 관리",
-                                    "ehs-compliance-agent" => "규정 준수",
-                                    _ => &session.agent_id,
-                                };
-                                
+
+                                let agent_name = session_agent_label(&props.agents, session);
+
                                 let time_str = session.timestamp.with_timezone(&chrono::Local).format("%m/%d %H:%M").to_string();
-                                
+
                                 html! {
                                     <div
                                         class={classes!("history-item", is_active.then_some("active"))}
@@ -189,16 +238,16 @@ pub fn sidebar(props: &SidebarProps) -> Html {
                                                 <span>{ time_str }</span>
                                             </div>
                                         </div>
-                                        <div 
+                                        <div
                                             id={target_id}
-                                            class={classes!("history-more-btn", is_dropdown_open.then_some("active"))} 
+                                            class={classes!("history-more-btn", is_dropdown_open.then_some("active"))}
                                             onclick={on_more_click}
                                         >
                                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg>
                                         </div>
-                                        
+
                                         if is_dropdown_open {
-                                            <div 
+                                            <div
                                                 class="dropdown-menu visible"
                                                 style={format!("top: {}px; left: {}px;", dropdown_pos.0, dropdown_pos.1)}
                                                 onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}

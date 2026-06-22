@@ -1,5 +1,5 @@
-use yew::prelude::*;
 use crate::types::AgentMeta;
+use yew::prelude::*;
 
 #[derive(Properties, PartialEq)]
 pub struct AgentSelectorProps {
@@ -19,7 +19,7 @@ pub fn agent_selector(props: &AgentSelectorProps) -> Html {
                     {"대화를 시작할 에이전트를 골라주세요."}
                 </p>
             </div>
-            
+
             <div class="agent-grid">
                 { for props.agents.iter().map(|agent| {
                     let agent_id = agent.id.clone();
@@ -27,7 +27,7 @@ pub fn agent_selector(props: &AgentSelectorProps) -> Html {
                         let cb = props.on_select.clone();
                         Callback::from(move |_: MouseEvent| cb.emit(agent_id.clone()))
                     };
-                    
+
                     html! {
                         <div class="agent-card" onclick={on_click}>
                             <div class={classes!("agent-card-icon", agent.css_class.to_string())}>

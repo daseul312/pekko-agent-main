@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// ── Query API ──
+pub const BOARD_POST_ANALYZING_AGENT_ID: &str = "board-post-analyzing";
+pub const COMPLIANCE_AGENT_ID: &str = "ehs-compliance-agent";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct QueryRequest {
@@ -10,6 +11,9 @@ pub struct QueryRequest {
     pub session_id: Option<Uuid>,
     pub tenant_id: String,
     pub user_id: String,
+    pub company_code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_owner_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -19,6 +23,14 @@ pub struct QueryResponse {
     pub response: String,
     pub tools_used: Vec<String>,
     pub token_usage: TokenUsage,
+    #[serde(default)]
+    pub route_kind: String,
+    #[serde(default)]
+    pub routed_agent_ids: Vec<String>,
+    #[serde(default)]
+    pub session_owner_token: Option<String>,
+    #[serde(default)]
+    pub old_new_comparison: Option<OldNewComparison>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -27,73 +39,211 @@ pub struct TokenUsage {
     pub output_tokens: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResponseVersion {
+    pub content: String,
+    pub tools_used: Vec<String>,
+    pub token_usage: Option<TokenUsage>,
+    #[serde(default)]
+    pub suggestions: Option<Vec<String>>,
+    #[serde(default)]
+    pub old_new_comparison: Option<OldNewComparison>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OldNewComparison {
+    pub source_mode: String,
+    pub law_name: String,
+    pub old_law: OldNewLawInfo,
+    pub new_law: OldNewLawInfo,
+    #[serde(default)]
+    pub article_comparisons: Vec<OldNewArticleComparison>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OldNewLawInfo {
+    pub law_name: Option<String>,
+    pub promulgation_date: Option<String>,
+    pub promulgation_number: Option<String>,
+    pub enforcement_date: Option<String>,
+    pub amendment_type: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OldNewArticleComparison {
+    pub article_no: Option<String>,
+    pub title: Option<String>,
+    pub change_type: Option<String>,
+    pub old_text: Option<String>,
+    pub new_text: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct SummarizeResponse {
     pub title: String,
 }
 
-// ── Health API ──
-
 #[derive(Clone, Debug, Deserialize)]
 pub struct HealthResponse {
     pub status: String,
-    pub version: String,
-    pub services: ServiceStatus,
 }
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ServiceStatus {
-    pub orchestrator: String,
-    pub tools_registered: usize,
-    pub active_agents: usize,
-}
-
-// ── Agents API ──
-
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct AgentInfo {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub status: String,
-    pub tools: Vec<String>,
-}
-
-// ── Tools API ──
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ToolInfo {
-    pub name: String,
-    pub description: String,
-}
-
-// ── Session History API ──
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct HistoryMessage {
-    pub role: String,
-    pub content: String,
-    pub timestamp: String,
-}
-
-// ── Error ──
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
-    pub code: String,
 }
 
-// ── Internal Chat Message (for UI state) ──
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ChatMessageUi {
+    BoardPostMenu,
+    BoardPostEditMenu,
+    BoardPostDeleteMenu,
+    BoardPostForm,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BoardPostTarget {
+    pub menu_id: i32,
+    pub board_name: String,
+    #[serde(default)]
+    pub top_menu_id: Option<i32>,
+    #[serde(default)]
+    pub middle_menu_id: Option<i32>,
+    #[serde(default)]
+    pub sub_menu_id: Option<i32>,
+    pub top_menu_name: Option<String>,
+    pub middle_menu_name: Option<String>,
+    pub sub_menu_name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct BoardPostMenu {
+    pub menu_id: i32,
+    pub menu_name: String,
+    pub parent_menu_id: Option<i32>,
+    pub depth: Option<i32>,
+    pub selectable: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct BoardPostMenuResponse {
+    pub menus: Vec<BoardPostMenu>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BoardPostCreateRequest {
+    pub menu_id: i32,
+    pub title: String,
+    pub contents: String,
+    pub is_fixed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixed_start_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixed_end_date: Option<String>,
+    pub attachments: Vec<BoardPostAttachmentRequest>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BoardPostAttachmentRequest {
+    pub fno: Option<i32>,
+    pub uuid: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct BoardPostCreateResponse {
+    pub board_name: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub post_id: Option<i32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct BoardPostListResponse {
+    pub posts: Vec<BoardPostListItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct BoardPostListItem {
+    pub post_id: i32,
+    pub bno: i32,
+    pub title: String,
+    pub employeename: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct BoardPostDetail {
+    pub board_name: String,
+    pub post_id: i32,
+    pub bno: i32,
+    pub title: String,
+    pub contents: String,
+    pub is_fixed: bool,
+    pub fixed_start_date: Option<String>,
+    pub fixed_end_date: Option<String>,
+    pub attachments: Vec<BoardPostExistingAttachment>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct BoardPostExistingAttachment {
+    pub fno: Option<i32>,
+    pub uuid: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BoardPostUpdateRequest {
+    pub title: String,
+    pub contents: String,
+    pub is_fixed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixed_start_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixed_end_date: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct BoardPostUpdateResponse {
+    pub board_name: String,
+    #[allow(dead_code)]
+    pub post_id: i32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct BoardPostDeleteResponse {
+    pub board_name: String,
+    #[allow(dead_code)]
+    pub post_id: i32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoardPostCompletion {
+    pub board_name: String,
+    pub message: String,
+    pub success: bool,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub id: String,
     pub role: MessageRole,
     pub content: String,
+    #[serde(default)]
+    pub request_content: Option<String>,
     pub tools_used: Vec<String>,
     pub token_usage: Option<TokenUsage>,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    pub suggestions: Option<Vec<String>>,
+    #[serde(default)]
+    pub old_new_comparison: Option<OldNewComparison>,
+    #[serde(default)]
+    pub response_versions: Vec<ResponseVersion>,
+    #[serde(default)]
+    pub current_response_index: usize,
+    #[serde(default)]
+    pub ui: Option<ChatMessageUi>,
+    #[serde(default)]
+    pub board_post_target: Option<BoardPostTarget>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -109,7 +259,81 @@ impl PartialEq for TokenUsage {
     }
 }
 
-// ── Agent metadata for sidebar ──
+impl ChatMessage {
+    pub fn response_page_count(&self) -> usize {
+        if matches!(self.role, MessageRole::Assistant | MessageRole::System) {
+            self.response_versions.len().max(1)
+        } else {
+            1
+        }
+    }
+
+    pub fn current_response_page(&self) -> usize {
+        if self.response_versions.is_empty() {
+            0
+        } else {
+            self.current_response_index
+                .min(self.response_versions.len() - 1)
+        }
+    }
+
+    pub fn ensure_response_versions(&mut self) {
+        if !matches!(self.role, MessageRole::Assistant | MessageRole::System)
+            || !self.response_versions.is_empty()
+        {
+            return;
+        }
+
+        self.response_versions.push(ResponseVersion {
+            content: self.content.clone(),
+            tools_used: self.tools_used.clone(),
+            token_usage: self.token_usage.clone(),
+            suggestions: self.suggestions.clone(),
+            old_new_comparison: self.old_new_comparison.clone(),
+        });
+        self.current_response_index = 0;
+    }
+
+    pub fn sync_current_response(&mut self) {
+        if self.response_versions.is_empty() {
+            return;
+        }
+
+        let index = self.current_response_page();
+        self.current_response_index = index;
+        let version = self.response_versions[index].clone();
+        self.content = version.content;
+        self.tools_used = version.tools_used;
+        self.token_usage = version.token_usage;
+        self.suggestions = version.suggestions;
+        self.old_new_comparison = version.old_new_comparison;
+    }
+
+    pub fn append_response_version(&mut self, version: ResponseVersion) {
+        if !matches!(self.role, MessageRole::Assistant | MessageRole::System) {
+            return;
+        }
+
+        self.ensure_response_versions();
+        self.response_versions.push(version);
+        self.current_response_index = self.response_versions.len().saturating_sub(1);
+        self.sync_current_response();
+    }
+
+    pub fn set_response_page(&mut self, index: usize) {
+        if !matches!(self.role, MessageRole::Assistant | MessageRole::System) {
+            return;
+        }
+
+        self.ensure_response_versions();
+        if self.response_versions.is_empty() {
+            return;
+        }
+
+        self.current_response_index = index.min(self.response_versions.len() - 1);
+        self.sync_current_response();
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentMeta {
@@ -126,29 +350,76 @@ impl AgentMeta {
             AgentMeta {
                 id: "ehs-permit-agent".into(),
                 name: "허가 관리".into(),
-                description: "위험작업 허가/승인 관리".into(),
+                description: "위험작업 허가와 TBM 관리".into(),
                 icon: "",
                 css_class: "permit",
             },
             AgentMeta {
                 id: "ehs-inspection-agent".into(),
                 name: "점검 관리".into(),
-                description: "안전점검/시설점검 관리".into(),
+                description: "위험성평가와 순회점검 관리".into(),
                 icon: "",
                 css_class: "inspection",
             },
             AgentMeta {
                 id: "ehs-compliance-agent".into(),
                 name: "규정 준수".into(),
-                description: "법규/규정 준수 확인".into(),
+                description: "법령, SOP, 위원회, MSDS 점검".into(),
                 icon: "",
                 css_class: "compliance",
+            },
+            AgentMeta {
+                id: "ehs-accident-agent".into(),
+                name: "사고 관리".into(),
+                description: "사고, 아차사고, 시정조치, 대외문서 관리".into(),
+                icon: "",
+                css_class: "accident",
+            },
+            AgentMeta {
+                id: "ehs-education-agent".into(),
+                name: "교육 관리".into(),
+                description: "안전교육, 교육계획, 설문, 알림 관리".into(),
+                icon: "",
+                css_class: "education",
+            },
+            AgentMeta {
+                id: "ehs-health-environment-agent".into(),
+                name: "보건·환경 관리".into(),
+                description: "유해물질, 작업환경, 건강검진, 비상대응 관리".into(),
+                icon: "",
+                css_class: "health-environment",
             },
         ]
     }
 }
 
-// ── Chat Session for History ──
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AuthUser {
+    pub id: String,
+    pub name: String,
+    pub company_code: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct LoginRequest {
+    pub employee_id: String,
+    pub company_code: String,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct LoginResponse {
+    pub employee_id: String,
+    pub employee_name: Option<String>,
+    pub company_code: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    pub expires_at: i64,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChatSession {
@@ -160,4 +431,10 @@ pub struct ChatSession {
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub is_pinned: bool,
+    #[serde(default)]
+    pub use_router: bool,
+    #[serde(default)]
+    pub routed_agent_ids: Vec<String>,
+    #[serde(default)]
+    pub session_owner_token: Option<String>,
 }

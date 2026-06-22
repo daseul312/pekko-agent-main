@@ -4,6 +4,12 @@
 **/*.rs.bk
 Cargo.lock
 
+# Machine-specific cargo config (absolute OpenSSL/protoc paths)
+/.cargo/
+
+# Local backups
+**/*.bak-*/
+
 # Environment
 .env
 .env.local

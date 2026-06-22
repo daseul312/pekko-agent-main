@@ -94,7 +94,7 @@ pub fn markdown_to_html(input: &str) -> String {
         i += 1;
     }
 
-    result
+    sanitize_html(&result)
 }
 
 /// 테이블 행인지 판단
@@ -111,7 +111,9 @@ fn is_separator_row(line: &str) -> bool {
         return false;
     }
     // |, -, :, 공백만으로 구성되면 구분선
-    trimmed.chars().all(|c| c == '|' || c == '-' || c == ':' || c == ' ')
+    trimmed
+        .chars()
+        .all(|c| c == '|' || c == '-' || c == ':' || c == ' ')
 }
 
 /// 테이블 행에서 셀 추출
@@ -131,7 +133,7 @@ fn parse_table_cells(row: &str) -> Vec<String> {
 
 /// 인라인 포맷팅: **볼드**, `코드`
 fn inline_format(text: &str) -> String {
-    let escaped = escape_html(text);
+    let escaped = escape_html(text).replace("&lt;br/&gt;", "<br/>");
 
     // **볼드** 처리
     let mut result = String::new();
@@ -167,9 +169,163 @@ fn inline_format(text: &str) -> String {
 }
 
 /// HTML 이스케이프
+fn sanitize_html(input: &str) -> String {
+    let mut result = String::new();
+    let mut cursor = 0;
+
+    while let Some(relative_start) = input[cursor..].find('<') {
+        let start = cursor + relative_start;
+        result.push_str(&input[cursor..start]);
+
+        let Some(relative_end) = input[start..].find('>') else {
+            result.push_str(&escape_html(&input[start..]));
+            return result;
+        };
+
+        let end = start + relative_end;
+        let tag = &input[start + 1..end];
+        result.push_str(&sanitize_tag(tag));
+        cursor = end + 1;
+    }
+
+    result.push_str(&input[cursor..]);
+    result
+}
+
+fn sanitize_tag(tag: &str) -> String {
+    let trimmed = tag.trim();
+    if trimmed.is_empty() || trimmed.starts_with('!') || trimmed.starts_with('?') {
+        return escape_html(&format!("<{tag}>"));
+    }
+
+    if let Some(closing) = trimmed.strip_prefix('/') {
+        let name = tag_name(closing);
+        if is_allowed_tag(name) && name != "br" {
+            return format!("</{name}>");
+        }
+        return escape_html(&format!("<{tag}>"));
+    }
+
+    let name = tag_name(trimmed);
+    if !is_allowed_tag(name) {
+        return escape_html(&format!("<{tag}>"));
+    }
+
+    if name == "br" {
+        return "<br/>".to_string();
+    }
+
+    let attrs = sanitize_attrs(name, trimmed.get(name.len()..).unwrap_or_default());
+    format!("<{name}{attrs}>")
+}
+
+fn tag_name(tag: &str) -> &str {
+    tag.trim_start()
+        .split(|ch: char| ch.is_whitespace() || ch == '/' || ch == '>')
+        .next()
+        .unwrap_or_default()
+}
+
+fn is_allowed_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "div"
+            | "table"
+            | "thead"
+            | "tbody"
+            | "tr"
+            | "th"
+            | "td"
+            | "pre"
+            | "code"
+            | "p"
+            | "br"
+            | "strong"
+    )
+}
+
+fn sanitize_attrs(tag_name: &str, attrs: &str) -> String {
+    if !matches!(tag_name, "div" | "code") {
+        return String::new();
+    }
+
+    let Some(class_value) = extract_class_attr(attrs) else {
+        return String::new();
+    };
+
+    let class_value = class_value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ' '))
+        .collect::<String>();
+    if class_value.is_empty() {
+        String::new()
+    } else {
+        format!(" class=\"{}\"", escape_html(&class_value))
+    }
+}
+
+fn extract_class_attr(attrs: &str) -> Option<String> {
+    let mut rest = attrs.trim();
+    while !rest.is_empty() {
+        let lower = rest.to_ascii_lowercase();
+        if lower.starts_with("class=") {
+            let value = rest.get("class=".len()..)?.trim_start();
+            if let Some(value) = value.strip_prefix('"') {
+                return value.split('"').next().map(str::to_string);
+            }
+            if let Some(value) = value.strip_prefix('\'') {
+                return value.split('\'').next().map(str::to_string);
+            }
+            return value.split_whitespace().next().map(str::to_string);
+        }
+
+        let Some(next_space) = rest.find(char::is_whitespace) else {
+            return None;
+        };
+        rest = rest[next_space..].trim_start();
+    }
+    None
+}
+
 fn escape_html(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markdown_escapes_raw_html() {
+        let html = markdown_to_html("<script>alert(1)</script><img src=x onerror=alert(1)>");
+
+        assert!(!html.contains("<script"));
+        assert!(!html.contains("<img"));
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("&lt;img src=x onerror=alert(1)&gt;"));
+    }
+
+    #[test]
+    fn sanitizer_removes_unsafe_tags_and_attributes() {
+        let html = sanitize_html(
+            r#"<p onclick="alert(1)">safe</p><script>alert(1)</script><code class="lang-rust x" onclick="x">ok</code><a href="javascript:alert(1)">bad</a>"#,
+        );
+
+        assert_eq!(
+            html,
+            r#"<p>safe</p>&lt;script&gt;alert(1)&lt;/script&gt;<code class="lang-rust x">ok</code>&lt;a href=&quot;javascript:alert(1)&quot;&gt;bad&lt;/a&gt;"#
+        );
+    }
+
+    #[test]
+    fn markdown_preserves_allowed_table_markup() {
+        let html = markdown_to_html("| A | B |\n|---|---|\n| **x** | `y` |");
+
+        assert!(html.contains("<div class=\"table-wrapper\"><table>"));
+        assert!(html.contains("<strong>x</strong>"));
+        assert!(html.contains("<code>y</code>"));
+    }
 }
