@@ -8,7 +8,7 @@ use axum::{
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use std::sync::Arc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
@@ -70,7 +70,37 @@ struct QueryResponse {
     response: String,
     tools_used: Vec<String>,
     token_usage: TokenUsage,
+    /// How the request was routed: "direct", "smart_single", or "multi_agent".
+    route_kind: String,
+    /// The agent ids that actually served this request.
+    routed_agent_ids: Vec<String>,
 }
+
+/// Result of executing a single agent's ReAct tool-loop.
+struct AgentQueryResult {
+    agent_id: String,
+    response: String,
+    tools_used: Vec<String>,
+    token_usage: TokenUsage,
+}
+
+/// Routing decision produced by the smart router.
+#[derive(Debug, Clone, Deserialize)]
+struct RoutingDecision {
+    primary_agent_id: String,
+    agent_ids: Vec<String>,
+    #[serde(default)]
+    rationale: String,
+}
+
+const VALID_AGENT_IDS: [&str; 6] = [
+    "ehs-permit-agent",
+    "ehs-inspection-agent",
+    "ehs-compliance-agent",
+    "ehs-accident-agent",
+    "ehs-education-agent",
+    "ehs-health-environment-agent",
+];
 
 /// Response for session summary
 #[derive(Serialize, Deserialize)]
@@ -118,6 +148,23 @@ fn build_system_prompt(agent_id: &str) -> String {
             "당신은 EHS(환경안전보건) 규정 준수 전문 AI 에이전트입니다.\n\
              역할: 법규/규정 준수 확인, MSDS 관리, 안전보건위원회 운영 현황, 컴플라이언스 보고서 지원\n\
              주요 테이블: msdsmanagement(MSDS), safetyhealthcommittee(안전보건위원회), employeeinfo(직원정보)"
+        }
+        "ehs-accident-agent" => {
+            "당신은 EHS(환경안전보건) 사고 관리 전문 AI 에이전트입니다.\n\
+             역할: 사고/재해 보고 조회, 아차사고(근접사고) 분석, 사고 원인 분석 및 재발방지, 시정조치/후속조치 추적, 협력업체 사고 관리\n\
+             주요 테이블: AccidentFreeManagement(사고/재해보고), NearMissManagement(아차사고), ReportHarmfulRiskFactors(유해위험요인보고), CorrectiveOrder(시정명령), ContractAccidentManagement(협력업체사고)"
+        }
+        "ehs-education-agent" => {
+            "당신은 EHS(환경안전보건) 교육 관리 전문 AI 에이전트입니다.\n\
+             역할: 안전교육 계획/현황 조회, 교육 이수/미이수 대상자 관리, 강사 배정 및 훈련 운영, 교육 알림/설문 현황 추적\n\
+             주요 테이블: SafetyEducationManagement(안전교육), EducationPlanManagement(교육계획), EducationPlanTarget(교육대상자), SurveyQuestionnaireManagement(설문), Notification(알림)\n\
+             참고: 교육 대상자는 educationyncode, educationcompletiondate, testpassyn, totalscore 컬럼으로 이수 여부를 판단하세요."
+        }
+        "ehs-health-environment-agent" => {
+            "당신은 EHS(환경안전보건) 보건·환경 관리 전문 AI 에이전트입니다.\n\
+             역할: 유해물질/화학물질 및 MSDS 관리, 작업환경측정 현황, 건강검진 관리, 비상대응/응급관리(비상연락망, 비상훈련, 구급함) 조회\n\
+             주요 테이블: HazardousMaterialsManagement(유해물질), MSDSManagement(MSDS), WorkEnvironmentManagement(작업환경측정), RegularHealthCheckup(건강검진), EmergencyContactInformation(비상연락망), EmergencyTraining(비상훈련), FirstAidKitInfo(구급함)\n\
+             참고: FirstAidKitInfo 테이블에는 companyCode 컬럼이 없으므로 회사코드 필터를 추가하지 마세요."
         }
         _ => {
             "당신은 EHS(환경안전보건) 통합 AI 에이전트입니다.\n\
@@ -278,6 +325,34 @@ async fn query_agent(
         details: serde_json::json!({"session_id": session_id}),
     }).await;
 
+    // Run the agent ReAct tool-loop (user message already stored above)
+    let result = execute_agent_query(&state, &agent_id, &req, session_id).await?;
+
+    Ok(Json(QueryResponse {
+        session_id,
+        agent_id: result.agent_id,
+        response: result.response,
+        tools_used: result.tools_used,
+        token_usage: result.token_usage,
+        route_kind: "direct".to_string(),
+        routed_agent_ids: vec![agent_id],
+    }))
+}
+
+/// Execute a single agent's ReAct tool-loop for the given request.
+///
+/// Builds the conversation history for context, runs the OpenAI/Claude tool loop with
+/// `build_system_prompt(agent_id)` + the registered tools, stores the assistant response
+/// in the conversation store, and returns the aggregated result. This is the reusable
+/// per-agent execution used by both `query_agent` and `query_home`.
+async fn execute_agent_query(
+    state: &AppState,
+    agent_id: &str,
+    req: &QueryRequest,
+    session_id: Uuid,
+) -> Result<AgentQueryResult, (StatusCode, Json<ErrorResponse>)> {
+    let conv_store = state.conversation_store.clone();
+
     // Build conversation history for LLM context
     let history = conv_store
         .get_conversation(&session_id)
@@ -306,7 +381,7 @@ async fn query_agent(
     info!(tool_count = claude_tools.len(), "Sending tools to Claude");
 
     // Build system prompt
-    let system_prompt = build_system_prompt(&agent_id);
+    let system_prompt = build_system_prompt(agent_id);
 
     // Tool use loop - keep calling Claude until it gives a final text response
     let mut messages = claude_messages;
@@ -461,15 +536,708 @@ async fn query_agent(
     all_tools_used.sort();
     all_tools_used.dedup();
 
-    Ok(Json(QueryResponse {
-        session_id,
-        agent_id,
+    Ok(AgentQueryResult {
+        agent_id: agent_id.to_string(),
         response: final_text,
         tools_used: all_tools_used,
         token_usage: TokenUsage {
             input_tokens: total_input_tokens,
             output_tokens: total_output_tokens,
         },
+    })
+}
+
+// ============================================================================
+// Smart router: classify a generic /api/query request to one or more agents.
+// ============================================================================
+
+const KOREAN_TABLE_HEADER_RULE: &str = "마크다운 테이블을 출력할 때는 모든 헤더 셀을 한국어로 작성하세요. 영어나 스키마 형태의 컬럼명은 사용자가 원본 유지를 명시적으로 요청하지 않는 한 간결하고 자연스러운 한국어 라벨로 번역하세요.";
+
+fn is_valid_agent_id(agent_id: &str) -> bool {
+    VALID_AGENT_IDS.contains(&agent_id)
+}
+
+fn agent_display_name(agent_id: &str) -> &'static str {
+    match agent_id {
+        "ehs-permit-agent" => "허가관리",
+        "ehs-inspection-agent" => "점검관리",
+        "ehs-compliance-agent" => "규정 준수",
+        "ehs-accident-agent" => "사고 관리",
+        "ehs-education-agent" => "교육 관리",
+        "ehs-health-environment-agent" => "보건·환경 관리",
+        _ => "EHS AI",
+    }
+}
+
+fn agent_routing_summary(agent_id: &str) -> &'static str {
+    match agent_id {
+        "ehs-permit-agent" => {
+            "작업허가서, 위험작업허가, TBM, 작업 전 계획과 체크리스트, 화기 작업 등 허가 기반 업무"
+        }
+        "ehs-inspection-agent" => {
+            "점검 일정, 순회점검, 위험성평가, 공동 안전점검, 점검 체크리스트와 개선조치"
+        }
+        "ehs-compliance-agent" => {
+            "법령, 규정, SOP, 심사 대응, 준수 여부 판단, 산업안전보건법과 사내 규정 검토"
+        }
+        "ehs-accident-agent" => {
+            "사고, 아차사고, 재해 보고, 원인 분석, 재발방지, 시정조치와 후속 조치"
+        }
+        "ehs-education-agent" => {
+            "안전교육 계획, 교육 이수, 강사 배정, 훈련 운영, 미이수 대상자 관리"
+        }
+        "ehs-health-environment-agent" => {
+            "보건, 환경, 유해물질, MSDS, 작업환경측정, 건강검진, 비상대응과 응급관리"
+        }
+        _ => "일반 EHS 업무",
+    }
+}
+
+fn normalize_agent_ids(agent_ids: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    let mut seen = HashSet::new();
+
+    for agent_id in agent_ids {
+        if is_valid_agent_id(&agent_id) && seen.insert(agent_id.clone()) {
+            normalized.push(agent_id);
+        }
+    }
+
+    normalized
+}
+
+fn add_token_usage(total: &mut TokenUsage, extra: &TokenUsage) {
+    total.input_tokens = total.input_tokens.saturating_add(extra.input_tokens);
+    total.output_tokens = total.output_tokens.saturating_add(extra.output_tokens);
+}
+
+fn truncate_for_prompt(content: &str, max_chars: usize) -> String {
+    let char_count = content.chars().count();
+    if char_count <= max_chars {
+        return content.to_string();
+    }
+
+    let mut truncated: String = content.chars().take(max_chars).collect();
+    truncated.push_str("\n...[truncated]");
+    truncated
+}
+
+fn collect_text_blocks(blocks: &[ContentBlock]) -> String {
+    let mut text = String::new();
+
+    for block in blocks {
+        if let ContentBlock::Text { text: block_text } = block {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(block_text);
+        }
+    }
+
+    text
+}
+
+fn extract_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    Some(&text[start..=end])
+}
+
+fn compact_lower(content: &str) -> String {
+    content
+        .split_whitespace()
+        .collect::<String>()
+        .to_lowercase()
+}
+
+fn is_prework_checklist_request(content: &str) -> bool {
+    let compact = compact_lower(content);
+
+    compact.contains("작업전체크리스트")
+        || compact.contains("작업전점검")
+        || compact.contains("preworkchecklist")
+        || compact.contains("pre-workchecklist")
+        || compact.contains("pre_work_checklist")
+        || (compact.contains("pre-work") && compact.contains("checklist"))
+        || (compact.contains("작업전") && compact.contains("체크리스트"))
+}
+
+fn is_round_inspection_request(content: &str) -> bool {
+    let compact = compact_lower(content);
+
+    compact.contains("순회점검")
+        || compact.contains("정기순회점검")
+        || compact.contains("roundinspectionmanagement")
+        || compact.contains("roundinspection")
+        || compact.contains("routineinspection")
+        || compact.contains("periodicroutineinspection")
+}
+
+fn has_cross_domain_routing_hint(content: &str) -> bool {
+    let normalized = content.to_lowercase();
+
+    let has_other_domain_keyword = [
+        "법령", "규정", "준수", "산업안전보건법", "사고", "재해", "교육", "보건", "환경", "msds",
+    ]
+    .iter()
+    .any(|keyword| normalized.contains(keyword));
+
+    let has_connector = [
+        "동시에", "함께", "연계", "그리고", "및", "하면서", "같이", "요약하면서", "알려주고",
+    ]
+    .iter()
+    .any(|keyword| normalized.contains(keyword));
+
+    has_other_domain_keyword && has_connector
+}
+
+fn has_explicit_multi_intent(content: &str) -> bool {
+    let normalized = content.to_lowercase();
+    [
+        "동시에", "함께", "연계", " 그리고 ", " 및 ", "하면서", "같이", "요약하면서", "알려주고",
+    ]
+    .iter()
+    .any(|token| normalized.contains(token.trim()))
+}
+
+/// Keyword classification over the 6 agents. This is the routing safety net used
+/// whenever the LLM classification fails or returns invalid JSON.
+fn routing_fallback(content: &str) -> RoutingDecision {
+    if is_prework_checklist_request(content) {
+        return RoutingDecision {
+            primary_agent_id: "ehs-permit-agent".to_string(),
+            agent_ids: vec!["ehs-permit-agent".to_string()],
+            rationale: "prework_checklist_is_permit_domain".to_string(),
+        };
+    }
+
+    if is_round_inspection_request(content) && !has_cross_domain_routing_hint(content) {
+        return RoutingDecision {
+            primary_agent_id: "ehs-inspection-agent".to_string(),
+            agent_ids: vec!["ehs-inspection-agent".to_string()],
+            rationale: "round_inspection_is_inspection_domain".to_string(),
+        };
+    }
+
+    let normalized = content.to_lowercase();
+
+    let specs: [(&str, &[&str]); 6] = [
+        (
+            "ehs-permit-agent",
+            &[
+                "permit", "허가", "작업허가", "위험작업", "tbm", "작업전", "pre-work", "화기",
+                "밀폐공간",
+            ],
+        ),
+        (
+            "ehs-inspection-agent",
+            &[
+                "inspection", "점검", "순회", "체크리스트", "위험성평가", "risk assessment",
+                "near miss", "개선조치",
+            ],
+        ),
+        (
+            "ehs-compliance-agent",
+            &[
+                "compliance", "법령", "규정", "준수", "sop", "법", "감사", "심사", "위반",
+                "산업안전보건법",
+            ],
+        ),
+        (
+            "ehs-accident-agent",
+            &[
+                "accident", "incident", "사고", "재해", "아차사고", "근접사고", "원인",
+                "재발방지", "조사",
+            ],
+        ),
+        (
+            "ehs-education-agent",
+            &[
+                "education", "training", "교육", "훈련", "이수", "강사", "수강", "교육계획",
+            ],
+        ),
+        (
+            "ehs-health-environment-agent",
+            &[
+                "health", "environment", "msds", "보건", "환경", "유해물질", "화학물질",
+                "작업환경", "건강검진", "응급", "비상",
+            ],
+        ),
+    ];
+
+    let mut ranked: Vec<(&str, usize)> = specs
+        .iter()
+        .map(|(agent_id, keywords)| {
+            let score = keywords
+                .iter()
+                .filter(|keyword| normalized.contains(*keyword))
+                .count();
+            (*agent_id, score)
+        })
+        .collect();
+
+    ranked.sort_by(|left, right| right.1.cmp(&left.1));
+
+    let positives: Vec<(&str, usize)> = ranked
+        .iter()
+        .copied()
+        .filter(|(_, score)| *score > 0)
+        .collect();
+
+    let multi_hint = [
+        "동시에", "함께", "연계", "그리고", "및", "법령", "규정", "하면서", "같이", "요약하면서",
+        "알려주고",
+    ];
+
+    let mut agent_ids: Vec<String> = if positives.is_empty() {
+        vec!["ehs-permit-agent".to_string()]
+    } else if positives.len() == 1 {
+        vec![positives[0].0.to_string()]
+    } else {
+        let choose_multiple = positives[1].1 + 1 >= positives[0].1
+            || multi_hint.iter().any(|hint| normalized.contains(hint));
+
+        if choose_multiple {
+            positives
+                .iter()
+                .take(3)
+                .map(|(agent_id, _)| (*agent_id).to_string())
+                .collect()
+        } else {
+            vec![positives[0].0.to_string()]
+        }
+    };
+
+    agent_ids = normalize_agent_ids(agent_ids);
+
+    if agent_ids.is_empty() {
+        agent_ids.push("ehs-permit-agent".to_string());
+    }
+
+    let has_accident = agent_ids.iter().any(|agent_id| agent_id == "ehs-accident-agent");
+    let has_compliance = agent_ids.iter().any(|agent_id| agent_id == "ehs-compliance-agent");
+
+    if has_accident
+        && has_compliance
+        && (normalized.contains("사고")
+            || normalized.contains("accident")
+            || normalized.contains("incident"))
+    {
+        agent_ids.retain(|agent_id| agent_id != "ehs-accident-agent");
+        agent_ids.insert(0, "ehs-accident-agent".to_string());
+    }
+
+    RoutingDecision {
+        primary_agent_id: agent_ids[0].clone(),
+        agent_ids,
+        rationale: "keyword_fallback".to_string(),
+    }
+}
+
+fn sanitize_routing_decision(content: &str, mut decision: RoutingDecision) -> RoutingDecision {
+    let fallback = routing_fallback(content);
+    decision.agent_ids = normalize_agent_ids(decision.agent_ids);
+
+    if is_valid_agent_id(&decision.primary_agent_id)
+        && !decision
+            .agent_ids
+            .iter()
+            .any(|agent_id| agent_id == &decision.primary_agent_id)
+    {
+        decision.agent_ids.insert(0, decision.primary_agent_id.clone());
+        decision.agent_ids = normalize_agent_ids(decision.agent_ids);
+    }
+
+    if decision.agent_ids.is_empty() {
+        return fallback;
+    }
+
+    if !is_valid_agent_id(&decision.primary_agent_id)
+        || !decision
+            .agent_ids
+            .iter()
+            .any(|agent_id| agent_id == &decision.primary_agent_id)
+    {
+        decision.primary_agent_id = decision.agent_ids[0].clone();
+    }
+
+    if decision.agent_ids.len() > 3 {
+        decision.agent_ids.truncate(3);
+        if !decision
+            .agent_ids
+            .iter()
+            .any(|agent_id| agent_id == &decision.primary_agent_id)
+        {
+            decision.primary_agent_id = decision.agent_ids[0].clone();
+        }
+    }
+
+    if decision.rationale.trim().is_empty() {
+        decision.rationale = fallback.rationale;
+    }
+
+    decision
+}
+
+fn merge_routing_decisions(
+    content: &str,
+    keyword_decision: RoutingDecision,
+    mut llm_decision: RoutingDecision,
+) -> RoutingDecision {
+    if keyword_decision.agent_ids.len() > 1 {
+        let missing_keyword_agents = keyword_decision
+            .agent_ids
+            .iter()
+            .any(|agent_id| !llm_decision.agent_ids.contains(agent_id));
+
+        if has_explicit_multi_intent(content)
+            || (llm_decision.agent_ids.len() == 1 && missing_keyword_agents)
+        {
+            llm_decision.agent_ids = keyword_decision.agent_ids.clone();
+            if !llm_decision
+                .agent_ids
+                .iter()
+                .any(|agent_id| agent_id == &llm_decision.primary_agent_id)
+            {
+                llm_decision.primary_agent_id = keyword_decision.primary_agent_id.clone();
+            }
+            if llm_decision.rationale.trim().is_empty() {
+                llm_decision.rationale = keyword_decision.rationale;
+            }
+        }
+    }
+
+    sanitize_routing_decision(content, llm_decision)
+}
+
+fn build_routing_prompt(content: &str) -> String {
+    let mut catalog = String::new();
+    for agent_id in VALID_AGENT_IDS {
+        catalog.push_str(&format!(
+            "- {agent_id}: {name}. {summary}\n",
+            name = agent_display_name(agent_id),
+            summary = agent_routing_summary(agent_id)
+        ));
+    }
+
+    format!("You route EHS user questions to specialized agents. Answer with JSON only.\n\
+Return a JSON object with exactly these keys: primary_agent_id, agent_ids, rationale.\n\
+Rules:\n\
+- Choose only from the listed agent ids.\n\
+- agent_ids must contain 1 to 3 ids.\n\
+- Choose multiple agents only when the user explicitly needs combined operational and compliance, accident and investigation, or other cross-domain synthesis.\n\
+- primary_agent_id must be the best page for the UI to navigate to first.\n\
+- Keep rationale short.\n\
+- Queries containing `Pre-work checklist`, `Pre-work Checklist`, or `pre-work checklist` must be sent to `ehs-permit-agent`.\n\
+- Queries containing `Routine Inspection`, `Periodic Routine Inspection`, or `RoundInspectionManagement` should be sent to `ehs-inspection-agent`.\n\
+- Queries about education, training, education plan, completion, incomplete education, completed education, target trainees, test score, pass score, retest, certificate, survey, or education notifications must be sent to `ehs-education-agent`, not `ehs-inspection-agent`.\n\
+- Korean queries containing `교육`, `교육계획`, `이수`, `미이수`, `수료`, `대상자`, `재시험`, `시험`, `점수`, `통과점수`, `설문`, or `교육 알림` must be sent to `ehs-education-agent`.\n\
+- `pre-work` has priority over generic `checklist`: even if `checklist` appears, do not send it to `ehs-inspection-agent` when the query includes `pre-work`; send it to `ehs-permit-agent`.\n\
+Available agents:\n\
+{catalog}\n\
+User question:\n\
+{content}")
+}
+
+/// Run a single one-shot LLM text request through the active provider and return the
+/// concatenated text response plus token usage. Returns an Err(String) on provider failure.
+async fn run_oneshot_llm(state: &AppState, request: &LlmRequest, context: &str) -> Result<(String, TokenUsage), String> {
+    let resp = if state.llm_provider == "openai" {
+        if let Some(ref openai) = state.openai_client {
+            openai.send_message(request).await.map_err(|e| {
+                error!(error = %e, context = context, "OpenAI one-shot call failed");
+                e.to_string()
+            })?
+        } else {
+            return Err("OpenAI client not configured".to_string());
+        }
+    } else {
+        state.claude_client.send_message(request).await.map_err(|e| {
+            error!(error = %e, context = context, "Claude one-shot call failed");
+            e.to_string()
+        })?
+    };
+
+    let text = collect_text_blocks(&resp.content);
+    let usage = TokenUsage {
+        input_tokens: resp.usage.input_tokens,
+        output_tokens: resp.usage.output_tokens,
+    };
+    Ok((text, usage))
+}
+
+/// LLM classify + keyword fallback merge. On any LLM/parse failure, returns the
+/// keyword fallback decision.
+async fn determine_routing_decision(
+    state: &AppState,
+    req: &QueryRequest,
+) -> (RoutingDecision, TokenUsage) {
+    let keyword_decision = routing_fallback(&req.content);
+    let llm_request = LlmRequest {
+        system_prompt:
+            "You classify EHS questions into the correct specialist agents. Return JSON only."
+                .to_string(),
+        messages: vec![ClaudeMessage {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: build_routing_prompt(&req.content),
+            }],
+        }],
+        tools: vec![],
+        // Reasoning models (gpt-5.x) spend budget on hidden reasoning before emitting
+        // output, so a small cap (e.g. 250) can yield empty content. Give enough room
+        // for reasoning + the small JSON object.
+        max_tokens: 2000,
+        temperature: Some(0.1),
+        cacheable: false,
+    };
+
+    match run_oneshot_llm(state, &llm_request, "smart routing").await {
+        Ok((raw, token_usage)) => {
+            let decision = extract_json_object(&raw)
+                .and_then(|json| serde_json::from_str::<RoutingDecision>(json).ok())
+                .map(|decision| {
+                    merge_routing_decisions(&req.content, keyword_decision.clone(), decision)
+                })
+                .unwrap_or_else(|| {
+                    warn!(response = %raw, "Routing JSON parse failed, using fallback");
+                    keyword_decision.clone()
+                });
+            (decision, token_usage)
+        }
+        Err(e) => {
+            warn!(error = %e, "Routing call failed, using fallback");
+            (
+                keyword_decision,
+                TokenUsage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                },
+            )
+        }
+    }
+}
+
+fn build_multi_agent_fallback(
+    question: &str,
+    decision: &RoutingDecision,
+    results: &[AgentQueryResult],
+) -> String {
+    let mut sections = vec![format!(
+        "질문을 종합 라우팅했습니다. 대표 에이전트는 {}이며, 관련 영역은 {} 입니다.",
+        agent_display_name(&decision.primary_agent_id),
+        decision
+            .agent_ids
+            .iter()
+            .map(|agent_id| agent_display_name(agent_id))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )];
+    sections.push(format!("원문 질문: {}", question));
+    for result in results {
+        sections.push(format!(
+            "[{}]\n{}",
+            agent_display_name(&result.agent_id),
+            truncate_for_prompt(&result.response, 1200)
+        ));
+    }
+    sections.join("\n\n")
+}
+
+fn build_multi_agent_summary_prompt(
+    question: &str,
+    decision: &RoutingDecision,
+    results: &[AgentQueryResult],
+) -> String {
+    let mut specialist_outputs = String::new();
+    for result in results {
+        specialist_outputs.push_str(&format!(
+            "## {} ({})\n{}\n\n",
+            agent_display_name(&result.agent_id),
+            result.agent_id,
+            truncate_for_prompt(&result.response, 2500)
+        ));
+    }
+
+    format!(
+        "You are the lead coordinator for an EHS multi-agent system. Answer in Korean.\n\
+{table_rule}\n\
+Synthesize the specialist outputs into one final response grounded only in the provided evidence.\n\
+If the specialist outputs disagree or one area needs more verification, say so clearly.\n\
+Use short markdown headings when useful.\n\
+Question:\n{question}\n\
+Routing rationale: {rationale}\n\
+Selected agents: {agents}\n\
+Specialist outputs:\n{specialist_outputs}",
+        table_rule = KOREAN_TABLE_HEADER_RULE,
+        rationale = decision.rationale,
+        agents = decision.agent_ids.iter().map(|agent_id| format!("{} ({})", agent_display_name(agent_id), agent_id)).collect::<Vec<_>>().join(", "),
+    )
+}
+
+/// Merge multiple specialist outputs into one final Korean answer via the LLM. On LLM
+/// failure, returns a deterministic concatenated fallback.
+async fn compose_multi_agent_response(
+    state: &AppState,
+    question: &str,
+    decision: &RoutingDecision,
+    results: &[AgentQueryResult],
+) -> (String, TokenUsage) {
+    let llm_request = LlmRequest {
+        system_prompt: format!(
+            "You combine EHS specialist outputs into one final Korean answer. {}",
+            KOREAN_TABLE_HEADER_RULE
+        ),
+        messages: vec![ClaudeMessage {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: build_multi_agent_summary_prompt(question, decision, results),
+            }],
+        }],
+        tools: vec![],
+        // Allow room for reasoning-model hidden tokens before the final synthesis text.
+        max_tokens: 4000,
+        temperature: Some(0.2),
+        cacheable: false,
+    };
+
+    match run_oneshot_llm(state, &llm_request, "multi-agent synthesis").await {
+        Ok((text, usage)) => (text, usage),
+        Err(e) => {
+            warn!(error = %e, "Multi-agent synthesis failed, using fallback text");
+            (
+                build_multi_agent_fallback(question, decision, results),
+                TokenUsage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                },
+            )
+        }
+    }
+}
+
+/// POST /api/query - Smart-route a query to one or more agents when no agent is selected.
+async fn query_home(
+    State(state): State<AppState>,
+    Json(req): Json<QueryRequest>,
+) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
+    let conv_store = state.conversation_store.clone();
+
+    info!(
+        session_id = %session_id,
+        content_len = req.content.len(),
+        "Smart-router query received"
+    );
+
+    // Load conversation history for context, then append the user message.
+    let _history = conv_store
+        .get_conversation(&session_id)
+        .await
+        .unwrap_or_default();
+
+    let _ = conv_store
+        .append_message(&session_id, Message::user(&req.content))
+        .await;
+
+    let (decision, routing_tokens) = determine_routing_decision(&state, &req).await;
+
+    // Single-agent smart route.
+    if decision.agent_ids.len() <= 1 {
+        let result = execute_agent_query(&state, &decision.primary_agent_id, &req, session_id).await?;
+        // Persist the assistant response.
+        let _ = conv_store
+            .append_message(&session_id, Message::assistant(&result.response))
+            .await;
+
+        let mut token_usage = result.token_usage.clone();
+        add_token_usage(&mut token_usage, &routing_tokens);
+
+        let routed_agent_ids = normalize_agent_ids(decision.agent_ids.clone());
+        let response_routed_agent_ids = if routed_agent_ids.is_empty() {
+            vec![result.agent_id.clone()]
+        } else {
+            routed_agent_ids
+        };
+
+        info!(
+            session_id = %session_id,
+            route_kind = "smart_single",
+            agent_id = %result.agent_id,
+            "Smart route resolved to single agent"
+        );
+
+        return Ok(Json(QueryResponse {
+            session_id,
+            agent_id: result.agent_id,
+            response: result.response,
+            tools_used: result.tools_used,
+            token_usage,
+            route_kind: "smart_single".to_string(),
+            routed_agent_ids: response_routed_agent_ids,
+        }));
+    }
+
+    // Multi-agent route: run each agent, then synthesize.
+    let mut total_tokens = routing_tokens;
+    let mut all_tools_used = Vec::new();
+    let mut results = Vec::new();
+
+    for agent_id in &decision.agent_ids {
+        let result = execute_agent_query(&state, agent_id, &req, session_id).await?;
+        add_token_usage(&mut total_tokens, &result.token_usage);
+        all_tools_used.extend(result.tools_used.iter().cloned());
+        results.push(result);
+    }
+
+    let (summary_text, summary_tokens) =
+        compose_multi_agent_response(&state, &req.content, &decision, &results).await;
+    add_token_usage(&mut total_tokens, &summary_tokens);
+
+    let _ = conv_store
+        .append_message(&session_id, Message::assistant(&summary_text))
+        .await;
+
+    all_tools_used.sort();
+    all_tools_used.dedup();
+
+    let routed_agent_ids = normalize_agent_ids(decision.agent_ids.clone());
+    let primary_agent_id = if routed_agent_ids
+        .iter()
+        .any(|agent_id| agent_id == &decision.primary_agent_id)
+    {
+        decision.primary_agent_id.clone()
+    } else {
+        routed_agent_ids
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "ehs-permit-agent".to_string())
+    };
+    let response_routed_agent_ids = if routed_agent_ids.is_empty() {
+        vec![primary_agent_id.clone()]
+    } else {
+        routed_agent_ids
+    };
+
+    info!(
+        session_id = %session_id,
+        route_kind = "multi_agent",
+        primary_agent_id = %primary_agent_id,
+        routed_agent_ids = ?response_routed_agent_ids,
+        "Smart route resolved to multiple agents"
+    );
+
+    Ok(Json(QueryResponse {
+        session_id,
+        agent_id: primary_agent_id,
+        response: summary_text,
+        tools_used: all_tools_used,
+        token_usage: total_tokens,
+        route_kind: "multi_agent".to_string(),
+        routed_agent_ids: response_routed_agent_ids,
     }))
 }
 
@@ -692,6 +1460,27 @@ async fn main() -> anyhow::Result<()> {
             capabilities: vec!["compliance_check".to_string(), "ehs_query".to_string()],
             status: AgentStatus::Available,
         });
+        orch.register_agent(AgentInfo {
+            agent_id: "ehs-accident-agent".to_string(),
+            agent_type: "ehs".to_string(),
+            description: "사고/재해 분석 및 재발방지 에이전트".to_string(),
+            capabilities: vec!["ehs_query".to_string()],
+            status: AgentStatus::Available,
+        });
+        orch.register_agent(AgentInfo {
+            agent_id: "ehs-education-agent".to_string(),
+            agent_type: "ehs".to_string(),
+            description: "안전교육 계획 및 이수 관리 에이전트".to_string(),
+            capabilities: vec!["ehs_query".to_string()],
+            status: AgentStatus::Available,
+        });
+        orch.register_agent(AgentInfo {
+            agent_id: "ehs-health-environment-agent".to_string(),
+            agent_type: "ehs".to_string(),
+            description: "보건·환경 및 비상대응 관리 에이전트".to_string(),
+            capabilities: vec!["ehs_query".to_string()],
+            status: AgentStatus::Available,
+        });
         info!("Registered {} EHS agents", orch.list_agents().len());
     }
 
@@ -737,6 +1526,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/health", get(health_check))
         .route("/api/agents", get(list_agents))
+        .route("/api/query", post(query_home))
         .route("/api/agents/:agent_id/query", post(query_agent))
         .route("/api/sessions/:session_id/history", get(get_session_history))
         .route("/api/sessions/:session_id/summarize", get(summarize_session))
