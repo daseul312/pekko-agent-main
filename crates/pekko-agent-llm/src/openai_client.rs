@@ -17,12 +17,22 @@ pub enum OpenAIError {
 
 // ─── OpenAI API Types ───
 
+/// Returns true for models that only support the default temperature (1) and reject
+/// custom values — currently the gpt-5.x family and the o-series reasoning models.
+fn model_locks_temperature(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.starts_with("gpt-5") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
+}
+
 #[derive(Serialize)]
 struct OpenAIRequest {
     model: String,
     messages: Vec<OpenAIMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OpenAITool>>,
+    // Newer OpenAI models (gpt-5.x, o-series) reject `max_tokens` and require
+    // `max_completion_tokens`, which is accepted by all current chat models.
+    #[serde(rename = "max_completion_tokens")]
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -163,10 +173,14 @@ impl OpenAIClient {
                     }
                 }
                 
+                let has_tool_calls = !tool_calls.is_empty();
+                // OpenAI requires message `content` to be a string. Empty text (e.g. a
+                // tool-call-only turn or a blank stored history message) must be sent as
+                // an empty string, never null/omitted (gpt-5.x rejects "got null").
                 messages.push(OpenAIMessage {
                     role: role.to_string(),
-                    content: if text_content.is_empty() { None } else { Some(text_content) },
-                    tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                    content: Some(text_content),
+                    tool_calls: if has_tool_calls { Some(tool_calls) } else { None },
                     tool_call_id: None,
                 });
             }
@@ -197,12 +211,20 @@ impl OpenAIClient {
             None
         };
 
+        // Newer OpenAI models (gpt-5.x, o-series reasoning models) only accept the
+        // default temperature (1) and reject custom values, so omit it for them.
+        let temperature = if model_locks_temperature(&self.model) {
+            None
+        } else {
+            request.temperature
+        };
+
         let openai_req = OpenAIRequest {
             model: self.model.clone(),
             messages,
             tools,
             max_tokens: request.max_tokens,
-            temperature: request.temperature,
+            temperature,
         };
 
         let resp = self.client
