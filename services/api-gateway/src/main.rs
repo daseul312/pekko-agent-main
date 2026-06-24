@@ -1415,55 +1415,25 @@ async fn run_oneshot_llm(state: &AppState, request: &LlmRequest, context: &str) 
     Ok((text, usage))
 }
 
-/// Answer a question unrelated to the EHS domains ("기타") with a brief general
-/// response — no EHS tools, no specialist prompt. Emits a single answer step.
-async fn execute_general_query(
-    state: &AppState,
-    content: &str,
-    emit: &(impl Fn(ProcessEvent) + Send + Sync),
-) -> (String, TokenUsage) {
-    const OTHER_FALLBACK: &str = "죄송합니다. 해당 질문은 EHS 업무 범위와 직접 관련이 없습니다. \
-         허가·점검·규정준수·사고·교육·보건·환경 관련 업무를 도와드릴 수 있습니다.";
+/// 비-EHS 질문에 대한 고정 거부 문구 (LLM 호출 없음 = 0토큰).
+const BLOCKED_MESSAGE: &str = "저는 EHS AI입니다. 요청하신 내용은 EHS 업무 범위와 \
+직접 관련이 없어 답변을 제공하지 않습니다.\n\n허가·점검·규정준수·사고·교육·보건환경 \
+관련 업무를 도와드릴 수 있습니다. 더 궁금한 점 있으신가요?";
 
-    emit(step_event("compose", "답변 생성", None, StepPhase::Active));
-
-    let llm_request = LlmRequest {
-        system_prompt:
-            "당신은 EHS(환경안전보건) 업무 보조 AI입니다. 사용자의 질문이 EHS 업무\
-             (허가·점검·규정준수·사고·교육·보건환경)와 직접 관련이 없습니다. 한국어로 간결하고 \
-             친절하게 답하되, 마지막에 EHS 관련 업무를 도와줄 수 있음을 한 문장으로 안내하세요. \
-             마크다운으로 답하세요."
-                .to_string(),
-        messages: vec![ClaudeMessage {
-            role: "user".to_string(),
-            content: vec![ContentBlock::Text {
-                text: content.to_string(),
-            }],
-        }],
-        tools: vec![],
-        max_tokens: 1500,
-        temperature: Some(0.4),
-        cacheable: false,
-    };
-
-    let (text, tokens) = match run_oneshot_llm(state, &llm_request, "general (기타) answer").await {
-        Ok((text, usage)) => (text, usage),
-        Err(_) => (
-            OTHER_FALLBACK.to_string(),
-            TokenUsage {
-                input_tokens: 0,
-                output_tokens: 0,
-            },
-        ),
-    };
-
-    let mut answer = sanitize_answer(&text);
-    if answer.trim().is_empty() {
-        answer = OTHER_FALLBACK.to_string();
+/// 0토큰 고정 거부 응답을 구성한다.
+fn blocked_query_response(session_id: Uuid) -> QueryResponse {
+    QueryResponse {
+        session_id,
+        agent_id: OTHER_AGENT_ID.to_string(),
+        response: BLOCKED_MESSAGE.to_string(),
+        tools_used: vec![],
+        token_usage: TokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+        },
+        route_kind: "blocked".to_string(),
+        routed_agent_ids: vec![OTHER_AGENT_ID.to_string()],
     }
-
-    emit(step_event("compose", "답변 생성", None, StepPhase::Done));
-    (answer, tokens)
 }
 
 /// LLM classify + keyword fallback merge. On any LLM/parse failure, returns the
@@ -1697,6 +1667,28 @@ async fn run_query_pipeline(
         .await;
 
     emit(step_event("intent", "질문 의도 파악", None, StepPhase::Active));
+
+    // 하이브리드 1단계: 키워드로 명백히 비-EHS면 LLM 호출 없이 즉시 차단(0토큰).
+    let keyword_decision = routing_fallback(&req.content);
+    if keyword_decision.rationale == "no_ehs_keyword_match" {
+        emit(step_event("intent", "질문 의도 파악", None, StepPhase::Done));
+        emit(step_event(
+            "routing",
+            "담당 에이전트 선정",
+            Some(agent_display_name(OTHER_AGENT_ID).to_string()),
+            StepPhase::Done,
+        ));
+        let _ = conv_store
+            .append_message(&session_id, Message::assistant(BLOCKED_MESSAGE))
+            .await;
+        info!(
+            session_id = %session_id,
+            route_kind = "blocked",
+            "Non-EHS query blocked at keyword stage (0 tokens)"
+        );
+        return Ok(blocked_query_response(session_id));
+    }
+
     let (decision, routing_tokens) = determine_routing_decision(state, req).await;
     emit(step_event("intent", "질문 의도 파악", None, StepPhase::Done));
 
@@ -1720,27 +1712,26 @@ async fn run_query_pipeline(
     // "기타": question unrelated to all 6 EHS domains. Answer generally without
     // running an EHS specialist agent, and label the agent as 기타.
     if decision.primary_agent_id == OTHER_AGENT_ID {
-        let (answer, general_tokens) = execute_general_query(state, &req.content, emit).await;
+        // 하이브리드 2단계: 키워드는 통과했으나 LLM 라우터가 최종적으로 "기타"로
+        // 판단한 애매한 질문. 답변 생성 LLM 호출 없이 고정 거부 메시지 반환
+        // (라우팅 토큰만 소비).
         let _ = conv_store
-            .append_message(&session_id, Message::assistant(&answer))
+            .append_message(&session_id, Message::assistant(BLOCKED_MESSAGE))
             .await;
-
-        let mut token_usage = routing_tokens;
-        add_token_usage(&mut token_usage, &general_tokens);
 
         info!(
             session_id = %session_id,
-            route_kind = "other",
-            "Query classified as unrelated (기타)"
+            route_kind = "blocked",
+            "Query classified as non-EHS by LLM router"
         );
 
         return Ok(QueryResponse {
             session_id,
             agent_id: OTHER_AGENT_ID.to_string(),
-            response: answer,
+            response: BLOCKED_MESSAGE.to_string(),
             tools_used: vec![],
-            token_usage,
-            route_kind: "other".to_string(),
+            token_usage: routing_tokens,
+            route_kind: "blocked".to_string(),
             routed_agent_ids: vec![OTHER_AGENT_ID.to_string()],
         });
     }
