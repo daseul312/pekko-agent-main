@@ -49,3 +49,8 @@ web-sys = { version = "0.3", features = [
 log = "0.4"
 wasm-logger = "0.2"
 chrono = { version = "0.4", features = ["wasmbind", "serde"] }
+rsa = { version = "0.9", features = ["pem"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+getrandom = { version = "0.2", features = ["js"] }

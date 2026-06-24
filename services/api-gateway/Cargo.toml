@@ -28,3 +28,10 @@ anyhow.workspace = true
 pekko-actor.workspace = true
 dotenvy.workspace = true
 sqlx.workspace = true
+jsonwebtoken.workspace = true
+bcrypt = "0.15"
+axum-extra = { version = "0.9", features = ["cookie"] }
+rsa = { version = "0.9", features = ["pem"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"

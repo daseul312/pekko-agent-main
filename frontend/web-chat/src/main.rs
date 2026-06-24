@@ -4,7 +4,6 @@ pub mod markdown;
 mod types;
 
 use gloo_storage::{LocalStorage, Storage};
-use gloo_timers::callback::Timeout;
 use uuid::Uuid;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
@@ -20,7 +19,6 @@ use types::{
     BOARD_POST_ANALYZING_AGENT_ID, COMPLIANCE_AGENT_ID, OTHER_AGENT_ID,
 };
 
-const AUTH_STORAGE_KEY: &str = "pekko_auth_user";
 const THEME_STORAGE_KEY: &str = "pekko_theme_dark";
 
 const STORAGE_KEY: &str = "pekko_chat_sessions";
@@ -474,7 +472,6 @@ fn apply_local_messages(
             is_pinned: false,
             use_router: use_router_value,
             routed_agent_ids,
-            session_owner_token: None,
         });
     }
 
@@ -517,9 +514,6 @@ fn submit_query(
     selected_agent_id: UseStateHandle<Option<String>>,
     use_router: UseStateHandle<bool>,
     active_routed_agent_ids: UseStateHandle<Vec<String>>,
-    auth_user: UseStateHandle<Option<AuthUser>>,
-    login_error: UseStateHandle<Option<String>>,
-    is_login_modal_open: UseStateHandle<bool>,
     content: String,
     request_content: String,
     current_msgs: Vec<ChatMessage>,
@@ -541,16 +535,7 @@ fn submit_query(
     let selected_agent_id_clone = selected_agent_id.clone();
     let use_router_clone = use_router.clone();
     let active_routed_agent_ids_clone = active_routed_agent_ids.clone();
-    let auth_user_clone = auth_user.clone();
-    let login_error_clone = login_error.clone();
-    let is_login_modal_open_clone = is_login_modal_open.clone();
     let sid = (*session_id).clone();
-    let session_owner_token = sid.as_ref().and_then(|sid| {
-        (*sessions)
-            .iter()
-            .find(|session| session.id == *sid)
-            .and_then(|session| session.session_owner_token.clone())
-    });
     let active_agent_id = (*selected_agent_id).clone();
 
     spawn_local(async move {
@@ -584,7 +569,6 @@ fn submit_query(
                 agent_id_opt.as_deref(),
                 &request_content,
                 sid,
-                session_owner_token.as_deref(),
                 on_event,
             )
             .await;
@@ -593,14 +577,7 @@ fn submit_query(
             // stream endpoint is unavailable), retry with the buffered endpoint
             // so answers still work (without the live steps).
             if res.is_err() && final_steps.is_empty() {
-                api::send_query(
-                    agent_id_opt.as_deref(),
-                    &request_content,
-                    sid,
-                    None,
-                    session_owner_token.as_deref(),
-                )
-                .await
+                api::send_query(agent_id_opt.as_deref(), &request_content, sid).await
             } else {
                 res
             }
@@ -656,10 +633,6 @@ fn submit_query(
 
                 let mut current_sessions = (*sessions_clone).clone();
                 let new_sid = resp.session_id;
-                let owner_token = resp
-                    .session_owner_token
-                    .clone()
-                    .or_else(|| session_owner_token.clone());
                 session_id_clone.set(Some(new_sid));
 
                 if let Some(idx) = current_sessions.iter().position(|s| s.id == new_sid) {
@@ -671,7 +644,6 @@ fn submit_query(
                     current_sessions[idx].timestamp = chrono::Utc::now();
                     current_sessions[idx].use_router = route_via_router;
                     current_sessions[idx].routed_agent_ids = routed_agent_ids.clone();
-                    current_sessions[idx].session_owner_token = owner_token.clone();
                 } else {
                     current_sessions.push(ChatSession {
                         id: new_sid,
@@ -683,19 +655,11 @@ fn submit_query(
                         is_pinned: false,
                         use_router: route_via_router,
                         routed_agent_ids: routed_agent_ids.clone(),
-                        session_owner_token: owner_token.clone(),
                     });
 
                     let sessions_inner = sessions_clone.clone();
-                    let summary_owner_token = owner_token.clone();
                     spawn_local(async move {
-                        if let Ok(summary_title) = api::fetch_session_summary(
-                            new_sid,
-                            None,
-                            summary_owner_token.as_deref(),
-                        )
-                        .await
-                        {
+                        if let Ok(summary_title) = api::fetch_session_summary(new_sid).await {
                             let mut s_list = (*sessions_inner).clone();
                             if let Some(id) = s_list.iter().position(|s| s.id == new_sid) {
                                 s_list[id].title = summary_title;
@@ -708,32 +672,25 @@ fn submit_query(
             }
             Err(e) => {
                 use_router_clone.set(route_via_router);
-                if api::is_session_expired_error(&e) {
-                    auth_user_clone.set(None);
-                    login_error_clone.set(Some(api::SESSION_EXPIRED_MESSAGE.to_string()));
-                    is_login_modal_open_clone.set(true);
-                    messages_clone.set(current_msgs.clone());
-                } else {
-                    let err_msg = ChatMessage {
-                        id: Uuid::new_v4().to_string(),
-                        role: MessageRole::System,
-                        content: format!("Error: {e}"),
-                        request_content: None,
-                        tools_used: vec![],
-                        token_usage: None,
-                        timestamp: chrono::Utc::now(),
-                        suggestions: None,
-                        old_new_comparison: None,
-                        response_versions: vec![],
-                        current_response_index: 0,
-                        ui: None,
-                        board_post_target: None,
-                        process_steps: Vec::new(),
-                    };
-                    let mut msgs = current_msgs.clone();
-                    msgs.push(err_msg);
-                    messages_clone.set(msgs);
-                }
+                let err_msg = ChatMessage {
+                    id: Uuid::new_v4().to_string(),
+                    role: MessageRole::System,
+                    content: format!("Error: {e}"),
+                    request_content: None,
+                    tools_used: vec![],
+                    token_usage: None,
+                    timestamp: chrono::Utc::now(),
+                    suggestions: None,
+                    old_new_comparison: None,
+                    response_versions: vec![],
+                    current_response_index: 0,
+                    ui: None,
+                    board_post_target: None,
+                    process_steps: Vec::new(),
+                };
+                let mut msgs = current_msgs.clone();
+                msgs.push(err_msg);
+                messages_clone.set(msgs);
             }
         }
         is_loading_clone.set(false);
@@ -828,65 +785,15 @@ fn app() -> Html {
     let health_status = use_state(|| Option::<String>::None);
     let use_router = use_state(|| false);
     let active_routed_agent_ids = use_state(Vec::<String>::new);
-    let initial_auth_user = LocalStorage::get::<AuthUser>(AUTH_STORAGE_KEY).ok();
-    let initial_session_expired = initial_auth_user
-        .as_ref()
-        .map(api::is_auth_user_expired)
-        .unwrap_or(false);
-    let auth_user =
-        use_state(move || initial_auth_user.filter(|user| !api::is_auth_user_expired(user)));
-    let is_login_modal_open = use_state(move || initial_session_expired);
+    // 로그인 신원은 HttpOnly 쿠키가 보유하며, 표시용 상태만 메모리에 둔다(새로고침 시 초기화).
+    let auth_user = use_state(|| Option::<AuthUser>::None);
+    let is_login_modal_open = use_state(|| false);
     let login_id = use_state(String::new);
     let login_password = use_state(String::new);
-    let login_error = use_state(move || {
-        initial_session_expired.then(|| api::SESSION_EXPIRED_MESSAGE.to_string())
-    });
+    let login_error = use_state(|| Option::<String>::None);
     let is_logging_in = use_state(|| false);
     let is_dark_mode = use_state(|| LocalStorage::get::<bool>(THEME_STORAGE_KEY).unwrap_or(false));
     let is_mobile_sidebar_open = use_state(|| false);
-
-    // Persist auth user
-    {
-        let auth_state = auth_user.clone();
-        use_effect_with((*auth_state).clone(), move |u| {
-            if let Some(user) = u {
-                let _ = LocalStorage::set(AUTH_STORAGE_KEY, user);
-            } else {
-                let _ = LocalStorage::delete(AUTH_STORAGE_KEY);
-            }
-            || ()
-        });
-    }
-
-    {
-        let auth_user_state = auth_user.clone();
-        let login_error_state = login_error.clone();
-        let is_login_modal_open_state = is_login_modal_open.clone();
-        use_effect_with((*auth_user).clone(), move |u| {
-            let timeout = u.as_ref().and_then(|user| {
-                user.expires_at.map(|expires_at| {
-                    let seconds_left = expires_at - chrono::Utc::now().timestamp();
-                    if seconds_left <= 0 {
-                        auth_user_state.set(None);
-                        login_error_state.set(Some(api::SESSION_EXPIRED_MESSAGE.to_string()));
-                        is_login_modal_open_state.set(true);
-                        Timeout::new(0, || {})
-                    } else {
-                        let delay = seconds_left.saturating_mul(1000).min(u32::MAX as i64) as u32;
-                        let auth_user_state = auth_user_state.clone();
-                        let login_error_state = login_error_state.clone();
-                        let is_login_modal_open_state = is_login_modal_open_state.clone();
-                        Timeout::new(delay, move || {
-                            auth_user_state.set(None);
-                            login_error_state.set(Some(api::SESSION_EXPIRED_MESSAGE.to_string()));
-                            is_login_modal_open_state.set(true);
-                        })
-                    }
-                })
-            });
-            move || drop(timeout)
-        });
-    }
 
     // Persist theme
     {
@@ -972,7 +879,8 @@ fn app() -> Html {
 
             is_logging_in.set(true);
             spawn_local(async move {
-                match api::login(id, password).await {
+                // 단일 회사 배포 기준 회사코드 "10" 고정. 다회사면 모달에 입력 필드 추가.
+                match api::login(id, password, "10".to_string()).await {
                     Ok(user) => {
                         auth_user.set(Some(user));
                         login_error.set(None);
@@ -988,13 +896,12 @@ fn app() -> Html {
         })
     };
 
+    // 모달을 닫고 비로그인(전체 조회) 상태로 계속 이용.
     let on_continue_without_login = {
-        let auth_user = auth_user.clone();
         let is_login_modal_open = is_login_modal_open.clone();
         let login_error = login_error.clone();
         let login_password = login_password.clone();
         Callback::from(move |_: MouseEvent| {
-            auth_user.set(None);
             login_error.set(None);
             login_password.set(String::new());
             is_login_modal_open.set(false);
@@ -1254,8 +1161,6 @@ fn app() -> Html {
         let use_router = use_router.clone();
         let active_routed_agent_ids = active_routed_agent_ids.clone();
         let auth_user = auth_user.clone();
-        let login_error = login_error.clone();
-        let is_login_modal_open = is_login_modal_open.clone();
         Callback::from(move |content: String| {
             let request_content = build_request_content((*messages).as_slice(), &content);
             let mut new_msgs = (*messages).clone();
@@ -1360,9 +1265,6 @@ fn app() -> Html {
                 selected_agent_id.clone(),
                 use_router.clone(),
                 active_routed_agent_ids.clone(),
-                auth_user.clone(),
-                login_error.clone(),
-                is_login_modal_open.clone(),
                 content,
                 request_content,
                 new_msgs,
@@ -1380,9 +1282,6 @@ fn app() -> Html {
         let selected_agent_id = selected_agent_id.clone();
         let use_router = use_router.clone();
         let active_routed_agent_ids = active_routed_agent_ids.clone();
-        let auth_user = auth_user.clone();
-        let login_error = login_error.clone();
-        let is_login_modal_open = is_login_modal_open.clone();
         Callback::from(move |assistant_message_id: String| {
             if *is_loading {
                 return;
@@ -1403,9 +1302,6 @@ fn app() -> Html {
                 selected_agent_id.clone(),
                 use_router.clone(),
                 active_routed_agent_ids.clone(),
-                auth_user.clone(),
-                login_error.clone(),
-                is_login_modal_open.clone(),
                 content,
                 request_content,
                 (*messages).clone(),

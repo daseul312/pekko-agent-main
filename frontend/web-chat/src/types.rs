@@ -14,8 +14,6 @@ pub struct QueryRequest {
     pub tenant_id: String,
     pub user_id: String,
     pub company_code: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_owner_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -29,8 +27,6 @@ pub struct QueryResponse {
     pub route_kind: String,
     #[serde(default)]
     pub routed_agent_ids: Vec<String>,
-    #[serde(default)]
-    pub session_owner_token: Option<String>,
     #[serde(default)]
     pub old_new_comparison: Option<OldNewComparison>,
 }
@@ -434,31 +430,37 @@ impl AgentMeta {
     }
 }
 
+/// 표시용 로그인 사용자(실제 인증은 HttpOnly 쿠키가 보유). 새 쿠키 기반 로그인에서 사용.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AuthUser {
     pub id: String,
     pub name: String,
     pub company_code: String,
-    #[serde(default)]
-    pub role: Option<String>,
-    #[serde(default)]
-    pub expires_at: Option<i64>,
+    pub role: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct LoginRequest {
     pub employee_id: String,
     pub company_code: String,
-    pub password: String,
+    /// RSA-OAEP(SHA-256)로 암호화한 비밀번호의 base64 문자열.
+    pub password_encrypted: String,
 }
 
+/// 게이트웨이 `GET /auth/public-key` 응답(비밀번호 암호화용 RSA 공개키 PEM).
+#[derive(Clone, Debug, Deserialize)]
+pub struct PublicKeyResponse {
+    pub public_key_pem: String,
+}
+
+/// 게이트웨이 `POST /auth/login` 응답(쿠키는 별도로 브라우저가 저장).
 #[derive(Clone, Debug, Deserialize)]
 pub struct LoginResponse {
     pub employee_id: String,
-    pub employee_name: Option<String>,
+    pub employee_name: String,
     pub company_code: String,
-    #[serde(default)]
-    pub role: Option<String>,
+    pub role: String,
+    #[allow(dead_code)]
     pub expires_at: i64,
 }
 
@@ -476,6 +478,4 @@ pub struct ChatSession {
     pub use_router: bool,
     #[serde(default)]
     pub routed_agent_ids: Vec<String>,
-    #[serde(default)]
-    pub session_owner_token: Option<String>,
 }

@@ -8,18 +8,6 @@ use crate::types::*;
 
 const API_BASE_URL: Option<&str> = option_env!("WEB_CHAT_API_BASE_URL");
 const API_PORT: &str = "8082";
-const SESSION_OWNER_TOKEN_HEADER: &str = "x-session-owner-token";
-pub const SESSION_EXPIRED_MESSAGE: &str = "로그인 세션이 만료되었습니다. 다시 로그인해주세요.";
-
-pub fn is_auth_user_expired(user: &AuthUser) -> bool {
-    user.expires_at
-        .map(|expires_at| chrono::Utc::now().timestamp() >= expires_at)
-        .unwrap_or(false)
-}
-
-pub fn is_session_expired_error(error: &str) -> bool {
-    error == SESSION_EXPIRED_MESSAGE
-}
 const LOCAL_API_BASE_URL: &str = "http://127.0.0.1:8082";
 
 fn configured_base_url() -> Option<String> {
@@ -97,17 +85,9 @@ pub async fn fetch_health() -> Result<HealthResponse, String> {
 }
 
 /// GET /api/sessions/:session_id/summarize
-pub async fn fetch_session_summary(
-    session_id: Uuid,
-    _token: Option<&str>,
-    session_owner_token: Option<&str>,
-) -> Result<String, String> {
+pub async fn fetch_session_summary(session_id: Uuid) -> Result<String, String> {
     let url = api_url(&format!("/api/sessions/{}/summarize", session_id));
-    let mut request = with_credentials(Request::get(&url));
-    if let Some(owner_token) = session_owner_token {
-        request = request.header(SESSION_OWNER_TOKEN_HEADER, owner_token);
-    }
-    let resp = request
+    let resp = with_credentials(Request::get(&url))
         .send()
         .await
         .map_err(|e| format!("Network error: {e}"))?;
@@ -128,13 +108,55 @@ pub async fn fetch_session_summary(
     }
 }
 
-/// POST /auth/login
-pub async fn login(employee_id: String, password: String) -> Result<AuthUser, String> {
+/// GET /auth/public-key — 비밀번호 암호화에 쓸 RSA 공개키(SPKI PEM)를 받아온다.
+async fn fetch_public_key_pem() -> Result<String, String> {
+    let url = api_url("/auth/public-key");
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+
+    if resp.ok() {
+        resp.json::<PublicKeyResponse>()
+            .await
+            .map(|r| r.public_key_pem)
+            .map_err(|e| format!("Parse error: {e}"))
+    } else {
+        Err(format!("공개키 조회 실패: HTTP {}", resp.status()))
+    }
+}
+
+/// 비밀번호를 서버 공개키로 RSA-OAEP(SHA-256) 암호화 후 base64 인코딩한다.
+fn encrypt_password(public_key_pem: &str, password: &str) -> Result<String, String> {
+    use base64::Engine;
+    use rsa::pkcs8::DecodePublicKey;
+
+    let public_key = rsa::RsaPublicKey::from_public_key_pem(public_key_pem)
+        .map_err(|e| format!("공개키 파싱 실패: {e}"))?;
+    let mut rng = rand::rngs::OsRng;
+    let ciphertext = public_key
+        .encrypt(&mut rng, rsa::Oaep::new::<sha2::Sha256>(), password.as_bytes())
+        .map_err(|e| format!("비밀번호 암호화 실패: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(ciphertext))
+}
+
+/// POST /auth/login — 비밀번호를 RSA 공개키로 암호화해 전송하면, 게이트웨이가 개인키로
+/// 복호화 후 EmployeeInfo로 bcrypt 검증하고 HttpOnly 세션 쿠키를 발급한다. 쿠키는
+/// `credentials: include` 덕분에 브라우저가 자동 저장하므로 여기서는 표시용 `AuthUser`만 돌려준다.
+pub async fn login(
+    employee_id: String,
+    password: String,
+    company_code: String,
+) -> Result<AuthUser, String> {
+    // 평문 비밀번호가 요청 payload에 노출되지 않도록 서버 공개키로 암호화해 보낸다.
+    let public_key_pem = fetch_public_key_pem().await?;
+    let password_encrypted = encrypt_password(&public_key_pem, &password)?;
+
     let url = api_url("/auth/login");
     let body = LoginRequest {
         employee_id,
-        company_code: "10".to_string(),
-        password,
+        company_code,
+        password_encrypted,
     };
 
     let resp = with_credentials(Request::post(&url))
@@ -151,17 +173,11 @@ pub async fn login(employee_id: String, password: String) -> Result<AuthUser, St
             .await
             .map_err(|e| format!("Parse error: {e}"))?;
 
-        let employee_name = login
-            .employee_name
-            .clone()
-            .unwrap_or_else(|| login.employee_id.clone());
-
         Ok(AuthUser {
             id: login.employee_id,
-            name: employee_name,
+            name: login.employee_name,
             company_code: login.company_code,
             role: login.role,
-            expires_at: Some(login.expires_at),
         })
     } else {
         let err = resp
@@ -185,8 +201,6 @@ pub async fn send_query(
     agent_id: Option<&str>,
     content: &str,
     session_id: Option<Uuid>,
-    _token: Option<&str>,
-    session_owner_token: Option<&str>,
 ) -> Result<QueryResponse, String> {
     let url = match agent_id {
         Some(agent_id) => api_url(&format!("/api/agents/{}/query", agent_id)),
@@ -198,7 +212,6 @@ pub async fn send_query(
         tenant_id: "default".to_string(),
         user_id: "web-user".to_string(),
         company_code: "10".to_string(),
-        session_owner_token: session_owner_token.map(str::to_string),
     };
 
     let request = with_credentials(Request::post(&url)).header("Content-Type", "application/json");
@@ -214,8 +227,6 @@ pub async fn send_query(
         resp.json::<QueryResponse>()
             .await
             .map_err(|e| format!("Parse error: {e}"))
-    } else if resp.status() == 401 {
-        Err(SESSION_EXPIRED_MESSAGE.to_string())
     } else {
         let err = resp
             .json::<ErrorResponse>()
@@ -235,7 +246,6 @@ pub async fn send_query_stream(
     agent_id: Option<&str>,
     content: &str,
     session_id: Option<Uuid>,
-    session_owner_token: Option<&str>,
     mut on_event: impl FnMut(ProcessEvent),
 ) -> Result<QueryResponse, String> {
     let url = match agent_id {
@@ -248,7 +258,6 @@ pub async fn send_query_stream(
         tenant_id: "default".to_string(),
         user_id: "web-user".to_string(),
         company_code: "10".to_string(),
-        session_owner_token: session_owner_token.map(str::to_string),
     };
     let body_json = serde_json::to_string(&body).map_err(|e| format!("Serialize error: {e}"))?;
 
@@ -261,9 +270,6 @@ pub async fn send_query_stream(
 
     let headers = web_sys::Headers::new().map_err(js_err)?;
     let _ = headers.set("Content-Type", "application/json");
-    if let Some(token) = session_owner_token {
-        let _ = headers.set(SESSION_OWNER_TOKEN_HEADER, token);
-    }
     opts.set_headers(&headers);
 
     let request =
@@ -275,9 +281,6 @@ pub async fn send_query_stream(
         .map_err(|e| format!("Network error: {}", js_err(e)))?;
     let resp: web_sys::Response = resp_value.dyn_into().map_err(js_err)?;
 
-    if resp.status() == 401 {
-        return Err(SESSION_EXPIRED_MESSAGE.to_string());
-    }
     if !resp.ok() {
         return Err(format!("HTTP {}", resp.status()));
     }

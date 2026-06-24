@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, State, Json},
     routing::{get, post},
     Router,
-    http::{StatusCode, header, HeaderName, HeaderValue, Method},
+    http::{StatusCode, header, HeaderValue, Method},
     response::IntoResponse,
 };
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
@@ -24,6 +24,9 @@ use pekko_agent_events::EventPublisher;
 use pekko_agent_security::{RbacManager, TenantManager, AuditLogger};
 use sqlx::PgPool;
 
+mod auth;
+use auth::{AuthIdentity, OptionalAuth};
+
 /// Shared application state with all services
 #[derive(Clone)]
 struct AppState {
@@ -40,6 +43,12 @@ struct AppState {
     claude_client: Arc<ClaudeClient>,
     openai_client: Option<Arc<OpenAIClient>>,
     llm_provider: String,
+    /// Postgres pool used by the login handler / auth (EmployeeInfo lookup).
+    pg_pool: Arc<PgPool>,
+    /// RSA private key used to decrypt the login password sent by the frontend.
+    rsa_private_key: Arc<rsa::RsaPrivateKey>,
+    /// Matching RSA public key (SPKI PEM) served to the frontend for encryption.
+    rsa_public_key_pem: Arc<str>,
 }
 
 /// Request payload for agent queries
@@ -328,8 +337,12 @@ struct ErrorResponse {
     code: String,
 }
 
-/// Build the system prompt based on the selected agent
-fn build_system_prompt(agent_id: &str) -> String {
+/// Build the system prompt based on the selected agent.
+///
+/// When `identity` is `Some`, the logged-in employee's scope is injected so the LLM
+/// filters results to that person (and their company). When `None` (anonymous), the
+/// company-wide / 전체 조회 behaviour is kept.
+fn build_system_prompt(agent_id: &str, identity: Option<&AuthIdentity>) -> String {
     let agent_desc = match agent_id {
         "ehs-permit-agent" => {
             "당신은 EHS(환경안전보건) 허가 관리 전문 AI 에이전트입니다.\n\
@@ -373,8 +386,29 @@ fn build_system_prompt(agent_id: &str) -> String {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let year = chrono::Local::now().format("%Y").to_string();
 
+    // 로그인 사용자 스코핑 지시문. 비로그인이면 전체 조회(기존 동작).
+    let scope_section = match identity {
+        Some(id) => format!(
+            "\n[현재 로그인 사용자] employeeId={emp}, companyCode={cc}, 이름={name}, 권한={role}\n\
+             [데이터 스코핑 규칙]\n\
+             - 모든 조회는 반드시 companyCode='{cc}' 조건으로 회사를 한정하세요(해당 컬럼이 있는 경우).\n\
+             - '내', '나의', '본인', '제가', '저한테' 같은 1인칭 표현이나 개인 담당 업무\n\
+             (순회점검, 교육 이수, 배정된 작업/허가 등)를 물으면, 담당자/대상자 컬럼을\n\
+             employeeId='{emp}'로 필터해 본인 관련 행만 조회하세요.\n\
+             - 담당자 컬럼명을 모르면 추측하지 말고 먼저 information_schema로 컬럼을 확인한 뒤\n\
+             (예: employeeid, chargerid, assignee, managerid, targetemployeeid 등) 적절한 컬럼으로 필터하세요.\n\
+             - 회사 전체 통계처럼 명백히 전체 대상을 묻는 경우에만 개인 필터를 생략하세요.\n",
+            emp = id.employee_id,
+            cc = id.company_code,
+            name = id.name,
+            role = id.role,
+        ),
+        None => "\n[비로그인 상태] 특정 개인으로 한정하지 말고 회사/전체 기준으로 조회하세요.\n"
+            .to_string(),
+    };
+
     format!(
-        "{agent_desc}\n\n\
+        "{agent_desc}\n{scope_section}\n\
          [현재 날짜] 오늘은 {today} 입니다. \
          날짜 관련 쿼리 시 이 날짜를 기준으로 하세요. \
          \"이번 달\", \"올해\", \"최근\" 등의 표현은 이 날짜 기준으로 해석하세요.\n\
@@ -481,11 +515,12 @@ async fn list_agents(State(state): State<AppState>) -> impl IntoResponse {
 async fn query_agent(
     Path(agent_id): Path<String>,
     State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
     let noop = |_: ProcessEvent| {};
-    run_agent_query_pipeline(&state, &agent_id, &req, session_id, &noop, false)
+    run_agent_query_pipeline(&state, &agent_id, &req, session_id, &noop, false, &auth)
         .await
         .map(Json)
 }
@@ -495,6 +530,7 @@ async fn query_agent(
 async fn query_agent_stream(
     Path(agent_id): Path<String>,
     State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
     Json(req): Json<QueryRequest>,
 ) -> axum::response::Response {
     use axum::body::{Body, Bytes};
@@ -514,7 +550,7 @@ async fn query_agent_stream(
             }
         };
 
-        match run_agent_query_pipeline(&state, &agent_id, &req, session_id, &emit, true).await {
+        match run_agent_query_pipeline(&state, &agent_id, &req, session_id, &emit, true, &auth).await {
             Ok(resp) => emit(ProcessEvent::Final(resp)),
             Err((_status, Json(body))) => emit(ProcessEvent::Error { message: body.error }),
         }
@@ -537,6 +573,7 @@ async fn run_agent_query_pipeline(
     session_id: Uuid,
     emit: &(impl Fn(ProcessEvent) + Send + Sync),
     stream: bool,
+    auth: &Option<AuthIdentity>,
 ) -> Result<QueryResponse, (StatusCode, Json<ErrorResponse>)> {
     info!(
         agent_id = %agent_id,
@@ -586,7 +623,7 @@ async fn run_agent_query_pipeline(
     ));
 
     // Run the agent ReAct tool-loop (user message already stored above)
-    let result = execute_agent_query(state, agent_id, req, session_id, emit, stream).await?;
+    let result = execute_agent_query(state, agent_id, req, session_id, emit, stream, auth).await?;
 
     Ok(QueryResponse {
         session_id,
@@ -612,6 +649,7 @@ async fn execute_agent_query(
     session_id: Uuid,
     emit: &(impl Fn(ProcessEvent) + Send + Sync),
     enable_plan: bool,
+    auth: &Option<AuthIdentity>,
 ) -> Result<AgentQueryResult, (StatusCode, Json<ErrorResponse>)> {
     let conv_store = state.conversation_store.clone();
 
@@ -643,7 +681,7 @@ async fn execute_agent_query(
     info!(tool_count = claude_tools.len(), "Sending tools to Claude");
 
     // Build system prompt
-    let system_prompt = build_system_prompt(agent_id);
+    let system_prompt = build_system_prompt(agent_id, auth.as_ref());
 
     // Tool use loop - keep calling Claude until it gives a final text response
     let mut messages = claude_messages;
@@ -806,13 +844,25 @@ async fn execute_agent_query(
                 StepPhase::Active,
             ));
 
-            // Execute each tool and collect results
+            // Execute each tool and collect results.
+            // When logged in, carry the verified identity (from the JWT cookie, not the
+            // request body) into the tool context so tools / future row-level guards can
+            // scope to the employee.
             let mut tool_results: Vec<ContentBlock> = Vec::new();
+            let mut credentials = HashMap::new();
+            if let Some(id) = auth {
+                credentials.insert("employee_id".to_string(), id.employee_id.clone());
+                credentials.insert("company_code".to_string(), id.company_code.clone());
+                credentials.insert("role".to_string(), id.role.clone());
+            }
             let tool_ctx = ToolContext {
                 tenant_id: req.tenant_id.clone(),
-                user_id: req.user_id.clone(),
+                user_id: auth
+                    .as_ref()
+                    .map(|i| i.employee_id.clone())
+                    .unwrap_or_else(|| req.user_id.clone()),
                 session_id,
-                credentials: HashMap::new(),
+                credentials,
                 timeout: Duration::from_secs(10),
             };
 
@@ -1589,11 +1639,12 @@ async fn compose_multi_agent_response(
 /// POST /api/query - Smart-route a query to one or more agents when no agent is selected.
 async fn query_home(
     State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
     let noop = |_: ProcessEvent| {};
-    run_query_pipeline(&state, &req, session_id, &noop, false)
+    run_query_pipeline(&state, &req, session_id, &noop, false, &auth)
         .await
         .map(Json)
 }
@@ -1603,6 +1654,7 @@ async fn query_home(
 /// the live processing steps. The terminal line is `{"type":"final", ...QueryResponse}`.
 async fn query_home_stream(
     State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
     Json(req): Json<QueryRequest>,
 ) -> axum::response::Response {
     use axum::body::{Body, Bytes};
@@ -1622,7 +1674,7 @@ async fn query_home_stream(
             }
         };
 
-        match run_query_pipeline(&state, &req, session_id, &emit, true).await {
+        match run_query_pipeline(&state, &req, session_id, &emit, true, &auth).await {
             Ok(resp) => emit(ProcessEvent::Final(resp)),
             Err((_status, Json(body))) => {
                 emit(ProcessEvent::Error { message: body.error })
@@ -1647,6 +1699,7 @@ async fn run_query_pipeline(
     session_id: Uuid,
     emit: &(impl Fn(ProcessEvent) + Send + Sync),
     stream: bool,
+    auth: &Option<AuthIdentity>,
 ) -> Result<QueryResponse, (StatusCode, Json<ErrorResponse>)> {
     let conv_store = state.conversation_store.clone();
 
@@ -1739,7 +1792,7 @@ async fn run_query_pipeline(
     // Single-agent smart route.
     if decision.agent_ids.len() <= 1 {
         let result =
-            execute_agent_query(state, &decision.primary_agent_id, req, session_id, emit, stream)
+            execute_agent_query(state, &decision.primary_agent_id, req, session_id, emit, stream, auth)
                 .await?;
         // Persist the assistant response.
         let _ = conv_store
@@ -1790,7 +1843,7 @@ async fn run_query_pipeline(
             None,
             StepPhase::Active,
         ));
-        let result = execute_agent_query(state, agent_id, req, session_id, &noop, false).await?;
+        let result = execute_agent_query(state, agent_id, req, session_id, &noop, false, auth).await?;
         emit(step_event(
             &step_id,
             &format!("{agent_name} 처리"),
@@ -1958,9 +2011,6 @@ async fn list_tools(State(state): State<AppState>) -> impl IntoResponse {
     Json(registry.list_tools())
 }
 
-/// Header the web-chat frontend sends to identify a session owner on credentialed requests.
-const SESSION_OWNER_TOKEN_HEADER: &str = "x-session-owner-token";
-
 /// Build a CORS layer that supports credentialed requests from the web-chat frontend.
 ///
 /// The frontend issues requests with `credentials: include`, so the browser rejects a
@@ -1990,7 +2040,6 @@ fn build_cors_layer() -> CorsLayer {
         .allow_headers(AllowHeaders::list([
             header::CONTENT_TYPE,
             header::AUTHORIZATION,
-            HeaderName::from_static(SESSION_OWNER_TOKEN_HEADER),
         ]))
         .allow_credentials(true)
 }
@@ -2039,6 +2088,25 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Connected to PostgreSQL database");
     let pg_pool = Arc::new(pg_pool);
+
+    // RSA keypair for login password encryption. Use LOGIN_RSA_PRIVATE_KEY (PEM) when set
+    // for cross-restart / multi-instance stability; otherwise generate an ephemeral key.
+    let (rsa_private_key, rsa_public_key_pem) = {
+        use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey};
+        let private_key = match std::env::var("LOGIN_RSA_PRIVATE_KEY") {
+            Ok(pem) => rsa::RsaPrivateKey::from_pkcs8_pem(pem.trim())
+                .expect("Invalid LOGIN_RSA_PRIVATE_KEY (expected PKCS#8 PEM)"),
+            Err(_) => {
+                info!("LOGIN_RSA_PRIVATE_KEY unset — generating an ephemeral RSA-2048 keypair");
+                let mut rng = rand::rngs::OsRng;
+                rsa::RsaPrivateKey::new(&mut rng, 2048).expect("RSA key generation failed")
+            }
+        };
+        let public_pem = rsa::RsaPublicKey::from(&private_key)
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .expect("Failed to encode RSA public key");
+        (Arc::new(private_key), Arc::<str>::from(public_pem))
+    };
 
     // Initialize tool registry with built-in tools
     let mut tool_registry = ToolRegistry::new();
@@ -2131,6 +2199,9 @@ async fn main() -> anyhow::Result<()> {
         claude_client,
         openai_client,
         llm_provider,
+        pg_pool: pg_pool.clone(),
+        rsa_private_key,
+        rsa_public_key_pem,
     };
 
     // Build the router
@@ -2141,6 +2212,9 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/api/health", get(health_check))
+        .route("/auth/public-key", get(auth::public_key_handler))
+        .route("/auth/login", post(auth::login_handler))
+        .route("/auth/logout", post(auth::logout_handler))
         .route("/api/agents", get(list_agents))
         .route("/api/query", post(query_home))
         .route("/api/query/stream", post(query_home_stream))
