@@ -158,6 +158,76 @@ fn tool_friendly_name(tool_name: &str) -> &'static str {
     }
 }
 
+/// 테이블명 → 한글 라벨. `ehs_query.rs`의 ALLOWED_TABLES와 동기화 유지.
+/// 미등록 테이블은 입력 이름을 그대로 돌려주므로 반환 수명은 입력에 묶인다.
+fn table_friendly_name(table: &str) -> &str {
+    match table {
+        "dangerousworkmanagement" => "위험작업허가",
+        "tbmmanagement" => "TBM",
+        "accidentfreemanagement" => "무재해",
+        "riskassessmentmanagement" => "위험성평가",
+        "nearmissmanagement" => "아차사고",
+        "safetyeducationmanagement" => "안전교육",
+        "msdsmanagement" => "MSDS",
+        "safetyhealthcommittee" => "안전보건위원회",
+        "employeeinfo" => "직원정보",
+        "worksitemanagement" => "작업장",
+        "facilitymanagement" => "시설",
+        "chemicalmanagement" => "화학물질",
+        "protectiveequipmentmanagement" => "보호구",
+        "healthcheckmanagement" => "건강검진",
+        "environmentalmanagement" => "환경",
+        _ => table, // 미등록 테이블은 원래 이름 그대로
+    }
+}
+
+/// `ehs_query` tool_input의 `sql`에서 조회 대상 테이블명을 추출해
+/// "한글명(테이블명)" 목록으로 반환한다. 알려진 테이블명을 단어 경계 단위로
+/// 매칭하므로 취약한 SQL 파서 없이도 안정적이다.
+fn describe_query_tables(input: &serde_json::Value) -> Vec<String> {
+    /// `ehs_query.rs`의 ALLOWED_TABLES와 동일한 15개. 변경 시 함께 갱신.
+    const KNOWN_TABLES: &[&str] = &[
+        "dangerousworkmanagement",
+        "tbmmanagement",
+        "accidentfreemanagement",
+        "riskassessmentmanagement",
+        "nearmissmanagement",
+        "safetyeducationmanagement",
+        "msdsmanagement",
+        "safetyhealthcommittee",
+        "employeeinfo",
+        "worksitemanagement",
+        "facilitymanagement",
+        "chemicalmanagement",
+        "protectiveequipmentmanagement",
+        "healthcheckmanagement",
+        "environmentalmanagement",
+    ];
+
+    let Some(sql) = input.get("sql").and_then(|v| v.as_str()) else {
+        return Vec::new();
+    };
+    let sql_lower = sql.to_lowercase();
+
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut tables: Vec<String> = KNOWN_TABLES
+        .iter()
+        .copied()
+        .filter(|t| {
+            // 단어 경계로 포함되는지 확인 (부분 문자열 오매칭 방지)
+            sql_lower.match_indices(*t).any(|(idx, m)| {
+                let before_ok = sql_lower[..idx].chars().next_back().map_or(true, |c| !is_ident(c));
+                let after_ok = sql_lower[idx + m.len()..].chars().next().map_or(true, |c| !is_ident(c));
+                before_ok && after_ok
+            })
+        })
+        .map(|t| format!("{}({})", table_friendly_name(t), t))
+        .collect();
+    tables.sort();
+    tables.dedup();
+    tables
+}
+
 /// A single extracted condition / normalized value in a query plan.
 #[derive(Deserialize)]
 struct PlanItem {
@@ -828,7 +898,17 @@ async fn execute_agent_query(
 
             let mut tool_descs: Vec<String> = tool_uses
                 .iter()
-                .map(|(_, name, _)| tool_friendly_name(name).to_string())
+                .flat_map(|(_, name, input)| {
+                    if name == "ehs_query" {
+                        let tables = describe_query_tables(input);
+                        if !tables.is_empty() {
+                            // 예: ["위험작업허가(dangerousworkmanagement)", "직원정보(employeeinfo)"]
+                            return tables;
+                        }
+                    }
+                    // ehs_query가 아니거나 테이블 추출 실패 시 기존 친절한 이름
+                    vec![tool_friendly_name(name).to_string()]
+                })
                 .collect();
             tool_descs.sort();
             tool_descs.dedup();
