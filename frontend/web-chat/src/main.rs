@@ -114,6 +114,14 @@ fn is_prework_plan_submission_request(content: &str) -> bool {
             || (normalized.contains("제출") && normalized.contains("현황")))
 }
 
+fn is_pending_permit_list_request(content: &str) -> bool {
+    let normalized = normalize_for_matching(content);
+    normalized.contains("오늘")
+        && normalized.contains("위험작업허가")
+        && (normalized.contains("확인대기") || normalized.contains("승인대기"))
+        && (normalized.contains("목록") || normalized.contains("리스트"))
+}
+
 fn build_request_content(messages: &[ChatMessage], content: &str) -> String {
     let Some(last_assistant) = messages.last() else {
         return content.to_string();
@@ -149,6 +157,16 @@ fn build_request_content(messages: &[ChatMessage], content: &str) -> String {
     let normalized_selected_content = normalize_for_matching(selected_content);
 
     if is_prework_plan_submission_request(base_content)
+        && PENDING_PERMIT_WORK_TYPES
+            .iter()
+            .any(|work_type| normalize_for_matching(work_type) == normalized_selected_content)
+    {
+        return format!(
+            "{base_content}\n선택한 항목: {selected_content}\n조회 기준 작업 유형: {selected_content}\n위 선택을 반영해서 다시 답변해줘."
+        );
+    }
+
+    if is_pending_permit_list_request(base_content)
         && PENDING_PERMIT_WORK_TYPES
             .iter()
             .any(|work_type| normalize_for_matching(work_type) == normalized_selected_content)
@@ -290,6 +308,30 @@ fn build_board_post_auth_required_message() -> ChatMessage {
         token_usage: None,
         timestamp: chrono::Utc::now(),
         suggestions: None,
+        old_new_comparison: None,
+        response_versions: vec![],
+        current_response_index: 0,
+        ui: None,
+        board_post_target: None,
+        process_steps: Vec::new(),
+    }
+}
+
+fn build_pending_permit_work_type_prompt_message() -> ChatMessage {
+    ChatMessage {
+        id: Uuid::new_v4().to_string(),
+        role: MessageRole::Assistant,
+        content: "어떤 작업구분의 위험작업 허가를 확인할까요? 아래에서 선택해 주세요.".to_string(),
+        request_content: None,
+        tools_used: vec![],
+        token_usage: None,
+        timestamp: chrono::Utc::now(),
+        suggestions: Some(
+            PENDING_PERMIT_WORK_TYPES
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        ),
         old_new_comparison: None,
         response_versions: vec![],
         current_response_index: 0,
@@ -1227,6 +1269,21 @@ fn app() -> Html {
                 return;
             }
 
+            if is_pending_permit_list_request(&content) {
+                new_msgs.push(build_pending_permit_work_type_prompt_message());
+                apply_local_messages(
+                    messages.clone(),
+                    session_id.clone(),
+                    sessions.clone(),
+                    selected_agent_id.clone(),
+                    use_router.clone(),
+                    active_routed_agent_ids.clone(),
+                    new_msgs,
+                    content,
+                );
+                return;
+            }
+
             if is_board_post_registration_request(&content) {
                 if auth_user.is_none() {
                     new_msgs.push(build_board_post_auth_required_message());
@@ -1760,11 +1817,7 @@ fn app() -> Html {
 
 fn extract_suggestions(user_content: &str, response_content: &str) -> Option<Vec<String>> {
     let normalized_user_content = normalize_for_matching(user_content);
-    let is_pending_permit_list_request = normalized_user_content.contains("오늘")
-        && normalized_user_content.contains("위험작업허가")
-        && (normalized_user_content.contains("확인대기")
-            || normalized_user_content.contains("승인대기"))
-        && (normalized_user_content.contains("목록") || normalized_user_content.contains("리스트"));
+    let is_pending_permit_list_request = is_pending_permit_list_request(user_content);
     let is_prework_plan_submission_query = is_prework_plan_submission_request(user_content);
     let is_checklist_request = normalized_user_content.contains("작업전체크리스트")
         || normalized_user_content.contains("체크리스트");
@@ -1791,7 +1844,7 @@ fn extract_suggestions(user_content: &str, response_content: &str) -> Option<Vec
         .iter()
         .any(|work_type| normalize_for_matching(work_type) == normalized_user_content);
 
-    if is_pending_permit_work_type_selection && is_no_results && !is_asking_type {
+    if is_pending_permit_work_type_selection {
         return None;
     }
 
