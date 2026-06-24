@@ -6,8 +6,8 @@
     <title>Core Agentic AI — EHS AI 채팅</title>
     
 <script type="module">
-import init, * as bindings from '/pekko-agent-web-chat-d56592d13c20964.js';
-const wasm = await init({ module_or_path: '/pekko-agent-web-chat-d56592d13c20964_bg.wasm' });
+import init, * as bindings from '/pekko-agent-web-chat-b5367c6512e044e1.js';
+const wasm = await init({ module_or_path: '/pekko-agent-web-chat-b5367c6512e044e1_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -456,6 +456,29 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
         white-space: nowrap;
         flex-shrink: 0;
+      }
+      .user-avatar {
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        object-fit: cover;
+        flex-shrink: 0;
+        background: #e2e8f0;
+        border: 1px solid var(--border);
+      }
+      .user-avatar-fallback {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 13px;
+        font-weight: 700;
+        color: #475569;
+        text-transform: uppercase;
+        user-select: none;
+      }
+      .dark .user-avatar-fallback {
+        color: #e2e8f0;
+        background: #334155;
       }
       .user-welcome {
         font-size: 14px;
@@ -2861,6 +2884,37 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         outline: none;
         border-color: var(--sidebar-active);
       }
+      .password-field {
+        position: relative;
+        display: flex;
+        align-items: center;
+      }
+      .password-field input {
+        width: 100%;
+        padding-right: 42px;
+      }
+      .password-toggle {
+        position: absolute;
+        right: 6px;
+        top: 50%;
+        transform: translateY(-50%);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px;
+        height: 30px;
+        padding: 0;
+        border: none;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        border-radius: 6px;
+        transition: color 0.15s, background 0.15s;
+      }
+      .password-toggle:hover {
+        color: var(--sidebar-active);
+        background: rgba(59, 130, 246, 0.08);
+      }
       .login-submit-btn {
         margin-top: 8px;
         padding: 12px;
@@ -3535,7 +3589,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         });
       }
     </script>
-  <link rel="modulepreload" href="/pekko-agent-web-chat-d56592d13c20964.js" crossorigin="anonymous" integrity="sha384-sUSERPP33eix9oqLAUCfLiiz1dRfqg0WfHfD3rx4mBZumASpkkpFBAk7c73ffsYs"><link rel="preload" href="/pekko-agent-web-chat-d56592d13c20964_bg.wasm" crossorigin="anonymous" integrity="sha384-yarr/rVZWCPOP5PLmU7gwSy89kInN1VjgzfjLX9s/KHflI9MsJE8RHdi2X5L/H2j" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/pekko-agent-web-chat-b5367c6512e044e1.js" crossorigin="anonymous" integrity="sha384-C+htHX/r43HNVJsdS0BAYNaa0yEI39G+XEi/jn7f8HLnmY/4r1Vu+jmP5z9PeytY"><link rel="preload" href="/pekko-agent-web-chat-b5367c6512e044e1_bg.wasm" crossorigin="anonymous" integrity="sha384-I2RlHtJ+Nn2WMhgWDBMlR0AMzR6mUPP7BZLRprCSJ5AGqvWYTiqo3UCFFabrUEjw" as="fetch" type="application/wasm"></head>
   <body><script>"use strict";
 
 (function () {

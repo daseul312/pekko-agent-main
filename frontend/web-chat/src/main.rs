@@ -792,6 +792,7 @@ fn app() -> Html {
     let login_password = use_state(String::new);
     let login_error = use_state(|| Option::<String>::None);
     let is_logging_in = use_state(|| false);
+    let show_password = use_state(|| false);
     let is_dark_mode = use_state(|| LocalStorage::get::<bool>(THEME_STORAGE_KEY).unwrap_or(false));
     let is_mobile_sidebar_open = use_state(|| false);
 
@@ -1670,6 +1671,11 @@ fn app() -> Html {
                     })
                 };
                 let on_continue_without_login = on_continue_without_login.clone();
+                let on_toggle_password = {
+                    let show_password = show_password.clone();
+                    Callback::from(move |_: MouseEvent| show_password.set(!*show_password))
+                };
+                let password_input_type = if *show_password { "text" } else { "password" };
 
                 html! {
                     <div class="modal-backdrop" onclick={on_close}>
@@ -1690,12 +1696,37 @@ fn app() -> Html {
                                 </div>
                                 <div class="form-group">
                                     <label>{ "비밀번호" }</label>
-                                    <input
-                                        type="password"
-                                        value={(*login_password).clone()}
-                                        oninput={on_password_input}
-                                        onkeydown={on_login_keydown.clone()}
-                                    />
+                                    <div class="password-field">
+                                        <input
+                                            type={password_input_type}
+                                            value={(*login_password).clone()}
+                                            oninput={on_password_input}
+                                            onkeydown={on_login_keydown.clone()}
+                                        />
+                                        <button
+                                            type="button"
+                                            class="password-toggle"
+                                            onclick={on_toggle_password}
+                                            aria-label={ if *show_password { "비밀번호 숨기기" } else { "비밀번호 표시" } }
+                                            title={ if *show_password { "비밀번호 숨기기" } else { "비밀번호 표시" } }
+                                        >
+                                            { if *show_password {
+                                                html! {
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"></path>
+                                                        <line x1="1" y1="1" x2="23" y2="23"></line>
+                                                    </svg>
+                                                }
+                                            } else {
+                                                html! {
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                                                        <circle cx="12" cy="12" r="3"></circle>
+                                                    </svg>
+                                                }
+                                            }}
+                                        </button>
+                                    </div>
                                 </div>
                                 if let Some(err) = &*login_error {
                                     <div class="login-error-msg">{ err }</div>

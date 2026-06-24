@@ -437,6 +437,8 @@ pub struct AuthUser {
     pub name: String,
     pub company_code: String,
     pub role: String,
+    /// 프로필 이미지 URL(S3 전체 URL, 없으면 None).
+    pub profile_image_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -462,6 +464,8 @@ pub struct LoginResponse {
     pub role: String,
     #[allow(dead_code)]
     pub expires_at: i64,
+    #[serde(default)]
+    pub profile_image_url: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

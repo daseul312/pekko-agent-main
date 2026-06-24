@@ -446,6 +446,29 @@
         white-space: nowrap;
         flex-shrink: 0;
       }
+      .user-avatar {
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        object-fit: cover;
+        flex-shrink: 0;
+        background: #e2e8f0;
+        border: 1px solid var(--border);
+      }
+      .user-avatar-fallback {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 13px;
+        font-weight: 700;
+        color: #475569;
+        text-transform: uppercase;
+        user-select: none;
+      }
+      .dark .user-avatar-fallback {
+        color: #e2e8f0;
+        background: #334155;
+      }
       .user-welcome {
         font-size: 14px;
         color: #475569;
@@ -2849,6 +2872,37 @@
       .form-group input:focus {
         outline: none;
         border-color: var(--sidebar-active);
+      }
+      .password-field {
+        position: relative;
+        display: flex;
+        align-items: center;
+      }
+      .password-field input {
+        width: 100%;
+        padding-right: 42px;
+      }
+      .password-toggle {
+        position: absolute;
+        right: 6px;
+        top: 50%;
+        transform: translateY(-50%);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px;
+        height: 30px;
+        padding: 0;
+        border: none;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        border-radius: 6px;
+        transition: color 0.15s, background 0.15s;
+      }
+      .password-toggle:hover {
+        color: var(--sidebar-active);
+        background: rgba(59, 130, 246, 0.08);
       }
       .login-submit-btn {
         margin-top: 8px;

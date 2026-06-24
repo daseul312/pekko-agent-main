@@ -71,6 +71,8 @@ pub struct LoginResponse {
     pub company_code: String,
     pub role: String,
     pub expires_at: i64,
+    /// 프로필 이미지 S3 URL(없으면 null).
+    pub profile_image_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,6 +92,33 @@ struct EmployeeRow {
     company_code: String,
     password: Option<String>,
     role: Option<String>,
+    /// 사원정보번호. Profile/FileUpload 조인으로 프로필 이미지를 찾는 키.
+    eino: i32,
+}
+
+/// 로그인 사용자의 현재 프로필 이미지 URL(S3 전체 URL)을 조회한다.
+/// `EmployeeInfo.eino → Profile.eino → Profile.uuid → FileUpload.uuid → fileUploadUrl`.
+/// 베스트-에포트: 조회 실패는 로그인에 영향을 주지 않고 `None`으로 처리한다.
+async fn fetch_profile_image_url(pool: &sqlx::PgPool, eino: i32) -> Option<String> {
+    let result = sqlx::query_scalar::<_, String>(
+        r#"SELECT f."fileUploadUrl"
+           FROM public."Profile" p
+           JOIN public."FileUpload" f ON f."uuid" = p."uuid"
+           WHERE p.eino = $1
+           ORDER BY p.createdate DESC NULLS LAST
+           LIMIT 1"#,
+    )
+    .bind(eino)
+    .fetch_optional(pool)
+    .await;
+
+    match result {
+        Ok(url) => url,
+        Err(e) => {
+            tracing::warn!(error = %e, eino, "프로필 이미지 조회 실패(무시)");
+            None
+        }
+    }
 }
 
 fn unauthorized() -> (StatusCode, Json<LoginError>) {
@@ -152,7 +181,7 @@ pub async fn login_handler(
     let password = decrypt_password(state.rsa_private_key.as_ref(), &req.password_encrypted)?;
 
     let row = sqlx::query_as::<_, EmployeeRow>(
-        r#"SELECT "employeeId", "employeeName", "companyCode", "password", "role"::text AS role
+        r#"SELECT "employeeId", "employeeName", "companyCode", "password", "role"::text AS role, eino
            FROM public."EmployeeInfo"
            WHERE "employeeId" = $1 AND "companyCode" = $2"#,
     )
@@ -177,6 +206,9 @@ pub async fn login_handler(
         .unwrap_or_else(|| row.employee_id.clone());
     let role = row.role.clone().unwrap_or_else(|| "USER".to_string());
 
+    // 프로필 이미지(베스트-에포트): 실패해도 로그인은 계속 진행.
+    let profile_image_url = fetch_profile_image_url(state.pg_pool.as_ref(), row.eino).await;
+
     let claims = Claims {
         sub: row.employee_id.clone(),
         company_code: row.company_code.clone(),
@@ -200,6 +232,7 @@ pub async fn login_handler(
             company_code: row.company_code,
             role,
             expires_at,
+            profile_image_url,
         }),
     ))
 }

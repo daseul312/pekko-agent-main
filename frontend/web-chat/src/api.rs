@@ -178,6 +178,7 @@ pub async fn login(
             name: login.employee_name,
             company_code: login.company_code,
             role: login.role,
+            profile_image_url: login.profile_image_url,
         })
     } else {
         let err = resp

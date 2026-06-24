@@ -17,8 +17,19 @@ pub struct HeaderProps {
 #[function_component(ChatHeader)]
 pub fn chat_header(props: &HeaderProps) -> Html {
     let auth_section = if let Some(user) = &props.auth_user {
+        let avatar = match &user.profile_image_url {
+            Some(url) if !url.is_empty() => html! {
+                <img class="user-avatar" src={url.clone()} alt="" />
+            },
+            _ => html! {
+                <span class="user-avatar user-avatar-fallback">
+                    { user.name.chars().next().unwrap_or('?').to_string() }
+                </span>
+            },
+        };
         html! {
             <div class="header-auth-info">
+                { avatar }
                 <span class="user-welcome">
                     <strong>{ &user.name }</strong>
                     { " 님" }
