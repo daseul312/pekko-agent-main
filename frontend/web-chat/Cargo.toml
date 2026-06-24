@@ -2,7 +2,7 @@
 name = "pekko-agent-web-chat"
 version = "0.1.0"
 edition = "2021"
-description = "EHS AI Agent ??梨꾪똿 UI (WASM)"
+description = "EHS AI Agent 웹 채팅 UI (WASM)"
 
 [dependencies]
 yew = { version = "0.21", features = ["csr"] }
