@@ -17,7 +17,7 @@ use components::sidebar::Sidebar;
 use types::{
     AgentMeta, AuthUser, BoardPostCompletion, ChatMessage, ChatMessageUi, ChatSession, MessageRole,
     OldNewComparison, ProcessEvent, ProcessStep, ResponseVersion, TokenUsage,
-    BOARD_POST_ANALYZING_AGENT_ID, COMPLIANCE_AGENT_ID,
+    BOARD_POST_ANALYZING_AGENT_ID, COMPLIANCE_AGENT_ID, OTHER_AGENT_ID,
 };
 
 const AUTH_STORAGE_KEY: &str = "pekko_auth_user";
@@ -790,6 +790,8 @@ fn summarize_agent_names(
         .filter_map(|agent_id| {
             if agent_id.as_str() == BOARD_POST_ANALYZING_AGENT_ID {
                 Some("분석 중".to_string())
+            } else if agent_id.as_str() == OTHER_AGENT_ID {
+                Some("기타".to_string())
             } else {
                 agents
                     .iter()

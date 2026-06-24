@@ -3,7 +3,7 @@ use serde_json;
 use wasm_bindgen::prelude::*;
 use yew::prelude::*;
 
-use crate::types::{AgentMeta, ChatSession, BOARD_POST_ANALYZING_AGENT_ID};
+use crate::types::{AgentMeta, ChatSession, BOARD_POST_ANALYZING_AGENT_ID, OTHER_AGENT_ID};
 
 #[wasm_bindgen]
 extern "C" {
@@ -31,6 +31,8 @@ fn session_agent_label(agents: &[AgentMeta], session: &ChatSession) -> String {
         .filter_map(|id| {
             if id.as_str() == BOARD_POST_ANALYZING_AGENT_ID {
                 Some("분석 중".to_string())
+            } else if id.as_str() == OTHER_AGENT_ID {
+                Some("기타".to_string())
             } else {
                 agents
                     .iter()

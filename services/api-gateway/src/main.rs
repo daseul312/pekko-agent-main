@@ -295,6 +295,10 @@ const VALID_AGENT_IDS: [&str; 6] = [
     "ehs-health-environment-agent",
 ];
 
+/// Sentinel agent id for questions unrelated to any of the 6 EHS domains.
+/// Displayed as "기타" in the conversation history.
+const OTHER_AGENT_ID: &str = "ehs-other";
+
 /// Response for session summary
 #[derive(Serialize, Deserialize)]
 struct SummarizeResponse {
@@ -973,6 +977,7 @@ fn agent_display_name(agent_id: &str) -> &'static str {
         "ehs-accident-agent" => "사고 관리",
         "ehs-education-agent" => "교육 관리",
         "ehs-health-environment-agent" => "보건·환경 관리",
+        "ehs-other" => "기타",
         _ => "EHS AI",
     }
 }
@@ -1195,6 +1200,15 @@ fn routing_fallback(content: &str) -> RoutingDecision {
         .filter(|(_, score)| *score > 0)
         .collect();
 
+    // No EHS keyword matched at all → treat as an unrelated ("기타") question.
+    if positives.is_empty() {
+        return RoutingDecision {
+            primary_agent_id: OTHER_AGENT_ID.to_string(),
+            agent_ids: vec![OTHER_AGENT_ID.to_string()],
+            rationale: "no_ehs_keyword_match".to_string(),
+        };
+    }
+
     let multi_hint = [
         "동시에", "함께", "연계", "그리고", "및", "법령", "규정", "하면서", "같이", "요약하면서",
         "알려주고",
@@ -1247,6 +1261,29 @@ fn routing_fallback(content: &str) -> RoutingDecision {
 
 fn sanitize_routing_decision(content: &str, mut decision: RoutingDecision) -> RoutingDecision {
     let fallback = routing_fallback(content);
+
+    // "기타" handling: if the decision points to the unrelated sentinel and no
+    // real EHS agent is also selected, keep it as a clean 기타 decision.
+    let mentions_other = decision.primary_agent_id == OTHER_AGENT_ID
+        || decision.agent_ids.iter().any(|id| id == OTHER_AGENT_ID);
+    if mentions_other {
+        let has_real_agent = decision.agent_ids.iter().any(|id| is_valid_agent_id(id));
+        if !has_real_agent {
+            let rationale = if decision.rationale.trim().is_empty() {
+                "other".to_string()
+            } else {
+                decision.rationale
+            };
+            return RoutingDecision {
+                primary_agent_id: OTHER_AGENT_ID.to_string(),
+                agent_ids: vec![OTHER_AGENT_ID.to_string()],
+                rationale,
+            };
+        }
+        // A real agent is present → this is a genuine EHS question; drop the
+        // sentinel below via normalize and proceed normally.
+    }
+
     decision.agent_ids = normalize_agent_ids(decision.agent_ids);
 
     if is_valid_agent_id(&decision.primary_agent_id)
@@ -1335,6 +1372,7 @@ fn build_routing_prompt(content: &str) -> String {
 Return a JSON object with exactly these keys: primary_agent_id, agent_ids, rationale.\n\
 Rules:\n\
 - Choose only from the listed agent ids.\n\
+- If the question is clearly unrelated to all 6 EHS domains (e.g. greetings, small talk, weather, general knowledge, or topics with no EHS/safety/health/environment connection), set primary_agent_id and agent_ids to [\"ehs-other\"]. Do NOT force an EHS agent for unrelated questions.\n\
 - agent_ids must contain 1 to 3 ids.\n\
 - Choose multiple agents only when the user explicitly needs combined operational and compliance, accident and investigation, or other cross-domain synthesis.\n\
 - primary_agent_id must be the best page for the UI to navigate to first.\n\
@@ -1375,6 +1413,57 @@ async fn run_oneshot_llm(state: &AppState, request: &LlmRequest, context: &str) 
         output_tokens: resp.usage.output_tokens,
     };
     Ok((text, usage))
+}
+
+/// Answer a question unrelated to the EHS domains ("기타") with a brief general
+/// response — no EHS tools, no specialist prompt. Emits a single answer step.
+async fn execute_general_query(
+    state: &AppState,
+    content: &str,
+    emit: &(impl Fn(ProcessEvent) + Send + Sync),
+) -> (String, TokenUsage) {
+    const OTHER_FALLBACK: &str = "죄송합니다. 해당 질문은 EHS 업무 범위와 직접 관련이 없습니다. \
+         허가·점검·규정준수·사고·교육·보건·환경 관련 업무를 도와드릴 수 있습니다.";
+
+    emit(step_event("compose", "답변 생성", None, StepPhase::Active));
+
+    let llm_request = LlmRequest {
+        system_prompt:
+            "당신은 EHS(환경안전보건) 업무 보조 AI입니다. 사용자의 질문이 EHS 업무\
+             (허가·점검·규정준수·사고·교육·보건환경)와 직접 관련이 없습니다. 한국어로 간결하고 \
+             친절하게 답하되, 마지막에 EHS 관련 업무를 도와줄 수 있음을 한 문장으로 안내하세요. \
+             마크다운으로 답하세요."
+                .to_string(),
+        messages: vec![ClaudeMessage {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: content.to_string(),
+            }],
+        }],
+        tools: vec![],
+        max_tokens: 1500,
+        temperature: Some(0.4),
+        cacheable: false,
+    };
+
+    let (text, tokens) = match run_oneshot_llm(state, &llm_request, "general (기타) answer").await {
+        Ok((text, usage)) => (text, usage),
+        Err(_) => (
+            OTHER_FALLBACK.to_string(),
+            TokenUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+            },
+        ),
+    };
+
+    let mut answer = sanitize_answer(&text);
+    if answer.trim().is_empty() {
+        answer = OTHER_FALLBACK.to_string();
+    }
+
+    emit(step_event("compose", "답변 생성", None, StepPhase::Done));
+    (answer, tokens)
 }
 
 /// LLM classify + keyword fallback merge. On any LLM/parse failure, returns the
@@ -1627,6 +1716,34 @@ async fn run_query_pipeline(
         Some(routed_display_names.join(" + ")),
         StepPhase::Done,
     ));
+
+    // "기타": question unrelated to all 6 EHS domains. Answer generally without
+    // running an EHS specialist agent, and label the agent as 기타.
+    if decision.primary_agent_id == OTHER_AGENT_ID {
+        let (answer, general_tokens) = execute_general_query(state, &req.content, emit).await;
+        let _ = conv_store
+            .append_message(&session_id, Message::assistant(&answer))
+            .await;
+
+        let mut token_usage = routing_tokens;
+        add_token_usage(&mut token_usage, &general_tokens);
+
+        info!(
+            session_id = %session_id,
+            route_kind = "other",
+            "Query classified as unrelated (기타)"
+        );
+
+        return Ok(QueryResponse {
+            session_id,
+            agent_id: OTHER_AGENT_ID.to_string(),
+            response: answer,
+            tools_used: vec![],
+            token_usage,
+            route_kind: "other".to_string(),
+            routed_agent_ids: vec![OTHER_AGENT_ID.to_string()],
+        });
+    }
 
     // Single-agent smart route.
     if decision.agent_ids.len() <= 1 {

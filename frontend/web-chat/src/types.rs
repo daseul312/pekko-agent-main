@@ -3,6 +3,8 @@ use uuid::Uuid;
 
 pub const BOARD_POST_ANALYZING_AGENT_ID: &str = "board-post-analyzing";
 pub const COMPLIANCE_AGENT_ID: &str = "ehs-compliance-agent";
+/// Sentinel agent id for questions unrelated to the 6 EHS domains; shown as "기타".
+pub const OTHER_AGENT_ID: &str = "ehs-other";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct QueryRequest {
