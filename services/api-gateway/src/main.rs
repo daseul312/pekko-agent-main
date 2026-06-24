@@ -17,7 +17,7 @@ use tracing::{info, error, warn};
 
 use pekko_agent_core::{Message, TokenUsage, ShortTermMemory, ToolContext, AgentInfo, AgentStatus};
 use pekko_agent_llm::{LlmConfig, ClaudeClient, OpenAIClient, LlmRequest, ClaudeMessage, ContentBlock, ClaudeTool};
-use pekko_agent_tools::{ToolRegistry, builtin::{PermitSearchTool, ComplianceCheckTool, EhsQueryTool}};
+use pekko_agent_tools::{ToolRegistry, builtin::{PermitSearchTool, ComplianceCheckTool, EhsQueryTool, LawCompareTool}};
 use pekko_agent_memory::{InMemoryConversationStore, InMemoryVectorStore, InMemoryEpisodicStore};
 use pekko_agent_orchestrator::OrchestratorActor;
 use pekko_agent_events::EventPublisher;
@@ -83,6 +83,40 @@ struct QueryResponse {
     route_kind: String,
     /// The agent ids that actually served this request.
     routed_agent_ids: Vec<String>,
+    /// 신구법비교(법령 개정 신·구 조문) 구조화 데이터. 법령 조회 도구가
+    /// 호출됐을 때만 채워지고, 그 외에는 직렬화에서 생략된다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    old_new_comparison: Option<OldNewComparison>,
+}
+
+/// 프론트엔드 `OldNewComparison`(web-chat/src/types.rs)과 1:1로 대응하는
+/// 신구법비교 구조. `law_oldnew_comparison` 도구가 만든 JSON을 그대로 역직렬화한다.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct OldNewComparison {
+    source_mode: String,
+    law_name: String,
+    old_law: OldNewLawInfo,
+    new_law: OldNewLawInfo,
+    #[serde(default)]
+    article_comparisons: Vec<OldNewArticleComparison>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct OldNewLawInfo {
+    law_name: Option<String>,
+    promulgation_date: Option<String>,
+    promulgation_number: Option<String>,
+    enforcement_date: Option<String>,
+    amendment_type: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct OldNewArticleComparison {
+    article_no: Option<String>,
+    title: Option<String>,
+    change_type: Option<String>,
+    old_text: Option<String>,
+    new_text: Option<String>,
 }
 
 /// Phase of a processing step on the wire.
@@ -354,6 +388,8 @@ struct AgentQueryResult {
     response: String,
     tools_used: Vec<String>,
     token_usage: TokenUsage,
+    /// `law_oldnew_comparison` 도구가 호출됐을 때 캡처된 신구법비교 데이터.
+    old_new_comparison: Option<OldNewComparison>,
 }
 
 /// Routing decision produced by the smart router.
@@ -427,7 +463,12 @@ fn build_system_prompt(agent_id: &str, identity: Option<&AuthIdentity>) -> Strin
         "ehs-compliance-agent" => {
             "당신은 EHS(환경안전보건) 규정 준수 전문 AI 에이전트입니다.\n\
              역할: 법규/규정 준수 확인, MSDS 관리, 안전보건위원회 운영 현황, 컴플라이언스 보고서 지원\n\
-             주요 테이블: msdsmanagement(MSDS), safetyhealthcommittee(안전보건위원회), employeeinfo(직원정보)"
+             주요 테이블: msdsmanagement(MSDS), safetyhealthcommittee(안전보건위원회), employeeinfo(직원정보)\n\
+             [법령 조회 도구] 법령 개정 내용, 최신 법령, 신구법 비교, 조문 변경을 묻는 질문에는\n\
+             반드시 law_oldnew_comparison 도구를 법령명(예: 산업안전보건법)으로 호출해 국가법령정보센터의\n\
+             실제 신구법비교 데이터를 가져오세요. 사내 DB(ehs_query)로 추측하지 마세요.\n\
+             신구법비교 표는 화면에 자동으로 렌더링되므로, 텍스트 답변에는 전체 조문을 나열하지 말고\n\
+             핵심 개정 사항(신설/삭제/주요 변경 조문)만 간결히 한국어로 요약하세요."
         }
         "ehs-accident-agent" => {
             "당신은 EHS(환경안전보건) 사고 관리 전문 AI 에이전트입니다.\n\
@@ -703,6 +744,7 @@ async fn run_agent_query_pipeline(
         token_usage: result.token_usage,
         route_kind: "direct".to_string(),
         routed_agent_ids: vec![agent_id.to_string()],
+        old_new_comparison: result.old_new_comparison,
     })
 }
 
@@ -759,6 +801,8 @@ async fn execute_agent_query(
     let mut total_input_tokens: u32 = 0;
     let mut total_output_tokens: u32 = 0;
     let mut final_text = String::new();
+    // 신구법비교 도구가 성공하면 그 구조화 결과를 캡처해 최종 응답에 실어 보낸다.
+    let mut captured_comparison: Option<OldNewComparison> = None;
     // Tracks whether the previous round executed tools, so the next LLM round is
     // labelled as "result review" instead of "initial analysis".
     let mut used_tool_last_round = false;
@@ -957,6 +1001,17 @@ async fn execute_agent_query(
 
                 let (content_str, is_error) = match result {
                     Ok(output) => {
+                        // 신구법비교 도구 결과는 구조화 데이터로 별도 캡처(첫 성공만).
+                        // LLM에는 아래에서 동일 내용이 tool_result로도 전달돼 텍스트 요약에 쓰인다.
+                        if tool_name == "law_oldnew_comparison"
+                            && !output.is_error
+                            && captured_comparison.is_none()
+                        {
+                            match serde_json::from_value::<OldNewComparison>(output.content.clone()) {
+                                Ok(cmp) => captured_comparison = Some(cmp),
+                                Err(e) => warn!(error = %e, "신구법비교 구조 파싱 실패"),
+                            }
+                        }
                         let content = serde_json::to_string(&output.content)
                             .unwrap_or_else(|_| "{}".to_string());
                         let content = truncate_tool_result(&content);
@@ -1086,6 +1141,7 @@ async fn execute_agent_query(
             input_tokens: total_input_tokens,
             output_tokens: total_output_tokens,
         },
+        old_new_comparison: captured_comparison,
     })
 }
 
@@ -1563,6 +1619,7 @@ fn blocked_query_response(session_id: Uuid) -> QueryResponse {
         },
         route_kind: "blocked".to_string(),
         routed_agent_ids: vec![OTHER_AGENT_ID.to_string()],
+        old_new_comparison: None,
     }
 }
 
@@ -1866,6 +1923,7 @@ async fn run_query_pipeline(
             token_usage: routing_tokens,
             route_kind: "blocked".to_string(),
             routed_agent_ids: vec![OTHER_AGENT_ID.to_string()],
+            old_new_comparison: None,
         });
     }
 
@@ -1904,6 +1962,7 @@ async fn run_query_pipeline(
             token_usage,
             route_kind: "smart_single".to_string(),
             routed_agent_ids: response_routed_agent_ids,
+            old_new_comparison: result.old_new_comparison,
         });
     }
 
@@ -1987,6 +2046,7 @@ async fn run_query_pipeline(
         token_usage: total_tokens,
         route_kind: "multi_agent".to_string(),
         routed_agent_ids: response_routed_agent_ids,
+        old_new_comparison: results.iter().find_map(|r| r.old_new_comparison.clone()),
     })
 }
 
@@ -2193,6 +2253,9 @@ async fn main() -> anyhow::Result<()> {
     tool_registry.register(Arc::new(PermitSearchTool));
     tool_registry.register(Arc::new(ComplianceCheckTool));
     tool_registry.register(Arc::new(EhsQueryTool::new(pg_pool.clone())));
+    tool_registry.register(Arc::new(LawCompareTool::new(
+        std::env::var("LAW_API_OC").unwrap_or_else(|_| "odaseul312".to_string()),
+    )));
 
     info!(tools = tool_registry.list_tools().len(), "Tool registry initialized");
 
