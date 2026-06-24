@@ -76,6 +76,199 @@ struct QueryResponse {
     routed_agent_ids: Vec<String>,
 }
 
+/// Phase of a processing step on the wire.
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum StepPhase {
+    Active,
+    Done,
+}
+
+/// Streaming progress event emitted while a query is processed.
+/// Serialized as one JSON object per line (NDJSON) on the `/stream` endpoints.
+///
+/// `Step` is a generic, upsert-by-`id` progress item so the pipeline can report
+/// fine-grained stages (analysis, DB query, result review, answer composition).
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ProcessEvent {
+    Step {
+        id: String,
+        label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        status: StepPhase,
+    },
+    /// Terminal event carrying the full query response.
+    Final(QueryResponse),
+    /// Terminal error event.
+    Error { message: String },
+}
+
+/// Build a `Step` event.
+fn step_event(id: &str, label: &str, detail: Option<String>, status: StepPhase) -> ProcessEvent {
+    ProcessEvent::Step {
+        id: id.to_string(),
+        label: label.to_string(),
+        detail,
+        status,
+    }
+}
+
+/// Remove tool-call artifacts that some providers (e.g. OpenAI gpt-5.5 harmony
+/// format) leak into the assistant's text channel — raw function-call markers
+/// like `to=functions.ehs_query` and standalone JSON argument objects such as
+/// `{"sql": "..."}`. Keeps the genuine answer untouched.
+fn sanitize_answer(text: &str) -> String {
+    let cleaned: Vec<&str> = text
+        .lines()
+        .filter(|line| {
+            let t = line.trim();
+            // Harmony function-call channel marker.
+            if t.starts_with("to=functions.") || t.starts_with("functions.") {
+                return false;
+            }
+            // A standalone single-line JSON object is almost always leaked tool
+            // arguments, not answer prose.
+            if t.starts_with("{\"") && t.ends_with('}') {
+                return false;
+            }
+            true
+        })
+        .collect();
+    cleaned.join("\n").trim().to_string()
+}
+
+/// A friendly Korean description of a tool, used in DB-query step details.
+fn tool_friendly_name(tool_name: &str) -> &'static str {
+    match tool_name {
+        "ehs_query" => "회사 EHS 데이터베이스",
+        "permit_search" => "작업허가 데이터",
+        "compliance_check" => "규정 준수 데이터",
+        _ => "데이터",
+    }
+}
+
+/// A single extracted condition / normalized value in a query plan.
+#[derive(Deserialize)]
+struct PlanItem {
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    value: String,
+}
+
+/// Structured analysis of the user's question produced before answering, used to
+/// surface detailed processing steps (condition extraction, value normalization).
+#[derive(Deserialize, Default)]
+struct QueryPlan {
+    #[serde(default)]
+    conditions: Vec<PlanItem>,
+    #[serde(default)]
+    normalized: Vec<PlanItem>,
+}
+
+/// Format plan items as "라벨: 값, 라벨: 값" for a step detail line.
+fn format_plan_items(items: &[PlanItem]) -> String {
+    items
+        .iter()
+        .map(|item| {
+            if item.value.is_empty() {
+                item.label.clone()
+            } else {
+                format!("{}: {}", item.label, item.value)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Extract a JSON object substring and parse it as a `QueryPlan`.
+fn parse_query_plan(text: &str) -> Option<QueryPlan> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    serde_json::from_str::<QueryPlan>(&text[start..=end]).ok()
+}
+
+/// Ask the LLM to analyze the question and return extracted conditions and their
+/// normalized DB values. Returns `None` on any failure (graceful degrade).
+async fn generate_query_plan(state: &AppState, content: &str) -> (Option<QueryPlan>, TokenUsage) {
+    let zero = TokenUsage {
+        input_tokens: 0,
+        output_tokens: 0,
+    };
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let system_prompt = format!(
+        "당신은 EHS(환경안전보건) 질의 분석기입니다. 사용자 질문을 분석해 JSON 객체 하나만 출력하세요. \
+         설명, 코드블록, 마크다운 없이 순수 JSON만 출력합니다.\n\
+         형식: {{\"conditions\":[{{\"label\":\"조건명\",\"value\":\"질문 속 표현\"}}],\
+         \"normalized\":[{{\"label\":\"조건명\",\"value\":\"DB 조회용 변환값\"}}]}}\n\
+         conditions 는 질문에서 추출한 조회 조건(기간, 점검유형, 상태, 부서 등), \
+         normalized 는 그 조건을 DB 조회용 값으로 변환한 것입니다(예: 기간 -> 'YYYY-MM-DD ~ YYYY-MM-DD', \
+         상태 -> 상태코드). 오늘 날짜는 {today} 입니다. 상대적 기간은 실제 날짜 범위로 변환하세요. \
+         조회 조건이 없으면 두 배열 모두 빈 배열로 두세요."
+    );
+    let llm_request = LlmRequest {
+        system_prompt,
+        messages: vec![ClaudeMessage {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: content.to_string(),
+            }],
+        }],
+        tools: vec![],
+        max_tokens: 600,
+        temperature: Some(0.0),
+        cacheable: false,
+    };
+
+    let resp = if state.llm_provider == "openai" {
+        match &state.openai_client {
+            Some(client) => match client.send_message(&llm_request).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    warn!(error = %e, "Query plan generation failed (openai)");
+                    return (None, zero);
+                }
+            },
+            None => return (None, zero),
+        }
+    } else {
+        match state.claude_client.send_message(&llm_request).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                warn!(error = %e, "Query plan generation failed (claude)");
+                return (None, zero);
+            }
+        }
+    };
+
+    let tokens = TokenUsage {
+        input_tokens: resp.usage.input_tokens,
+        output_tokens: resp.usage.output_tokens,
+    };
+
+    let mut plan_text = String::new();
+    for block in &resp.content {
+        if let ContentBlock::Text { text } = block {
+            plan_text.push_str(text);
+        }
+    }
+
+    (parse_query_plan(&plan_text), tokens)
+}
+
+/// Serialize a `ProcessEvent` into a single NDJSON line (trailing `\n`).
+fn to_ndjson_line(event: &ProcessEvent) -> Option<String> {
+    serde_json::to_string(event).ok().map(|mut s| {
+        s.push('\n');
+        s
+    })
+}
+
 /// Result of executing a single agent's ReAct tool-loop.
 struct AgentQueryResult {
     agent_id: String,
@@ -280,14 +473,67 @@ async fn list_agents(State(state): State<AppState>) -> impl IntoResponse {
     Json(agents)
 }
 
-/// POST /api/agents/:agent_id/query - Submit a query to an agent
+/// POST /api/agents/:agent_id/query - Submit a query to a specific agent (buffered).
 async fn query_agent(
     Path(agent_id): Path<String>,
     State(state): State<AppState>,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
+    let noop = |_: ProcessEvent| {};
+    run_agent_query_pipeline(&state, &agent_id, &req, session_id, &noop, false)
+        .await
+        .map(Json)
+}
 
+/// POST /api/agents/:agent_id/query/stream - same as `query_agent` but streams
+/// progress events as NDJSON so the frontend can show the live processing steps.
+async fn query_agent_stream(
+    Path(agent_id): Path<String>,
+    State(state): State<AppState>,
+    Json(req): Json<QueryRequest>,
+) -> axum::response::Response {
+    use axum::body::{Body, Bytes};
+    use tokio_stream::wrappers::UnboundedReceiverStream;
+
+    let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
+    let (tx, rx) =
+        tokio::sync::mpsc::unbounded_channel::<Result<Bytes, std::convert::Infallible>>();
+
+    tokio::spawn(async move {
+        let emit = {
+            let tx = tx.clone();
+            move |event: ProcessEvent| {
+                if let Some(line) = to_ndjson_line(&event) {
+                    let _ = tx.send(Ok(Bytes::from(line)));
+                }
+            }
+        };
+
+        match run_agent_query_pipeline(&state, &agent_id, &req, session_id, &emit, true).await {
+            Ok(resp) => emit(ProcessEvent::Final(resp)),
+            Err((_status, Json(body))) => emit(ProcessEvent::Error { message: body.error }),
+        }
+    });
+
+    let stream = UnboundedReceiverStream::new(rx);
+    axum::response::Response::builder()
+        .header(header::CONTENT_TYPE, "application/x-ndjson")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(stream))
+        .expect("failed to build streaming response")
+}
+
+/// Core direct-agent pipeline shared by the buffered and streaming endpoints.
+/// `emit` receives progress events; pass a no-op closure for the buffered path.
+async fn run_agent_query_pipeline(
+    state: &AppState,
+    agent_id: &str,
+    req: &QueryRequest,
+    session_id: Uuid,
+    emit: &(impl Fn(ProcessEvent) + Send + Sync),
+    stream: bool,
+) -> Result<QueryResponse, (StatusCode, Json<ErrorResponse>)> {
     info!(
         agent_id = %agent_id,
         session_id = %session_id,
@@ -318,25 +564,35 @@ async fn query_agent(
         id: Uuid::new_v4(),
         timestamp: chrono::Utc::now(),
         tenant_id: req.tenant_id.clone(),
-        agent_id: agent_id.clone(),
+        agent_id: agent_id.to_string(),
         action: "query".to_string(),
         resource: format!("agent/{}", agent_id),
         outcome: pekko_agent_security::AuditOutcome::Success,
         details: serde_json::json!({"session_id": session_id}),
     }).await;
 
-    // Run the agent ReAct tool-loop (user message already stored above)
-    let result = execute_agent_query(&state, &agent_id, &req, session_id).await?;
+    // A specific agent was chosen, so there is no routing classification — just
+    // report the agent being called, then run the answer (which emits its own
+    // fine-grained steps).
+    emit(step_event(
+        "routing",
+        "담당 에이전트",
+        Some(agent_display_name(agent_id).to_string()),
+        StepPhase::Done,
+    ));
 
-    Ok(Json(QueryResponse {
+    // Run the agent ReAct tool-loop (user message already stored above)
+    let result = execute_agent_query(state, agent_id, req, session_id, emit, stream).await?;
+
+    Ok(QueryResponse {
         session_id,
         agent_id: result.agent_id,
         response: result.response,
         tools_used: result.tools_used,
         token_usage: result.token_usage,
         route_kind: "direct".to_string(),
-        routed_agent_ids: vec![agent_id],
-    }))
+        routed_agent_ids: vec![agent_id.to_string()],
+    })
 }
 
 /// Execute a single agent's ReAct tool-loop for the given request.
@@ -350,6 +606,8 @@ async fn execute_agent_query(
     agent_id: &str,
     req: &QueryRequest,
     session_id: Uuid,
+    emit: &(impl Fn(ProcessEvent) + Send + Sync),
+    enable_plan: bool,
 ) -> Result<AgentQueryResult, (StatusCode, Json<ErrorResponse>)> {
     let conv_store = state.conversation_store.clone();
 
@@ -389,8 +647,60 @@ async fn execute_agent_query(
     let mut total_input_tokens: u32 = 0;
     let mut total_output_tokens: u32 = 0;
     let mut final_text = String::new();
+    // Tracks whether the previous round executed tools, so the next LLM round is
+    // labelled as "result review" instead of "initial analysis".
+    let mut used_tool_last_round = false;
+
+    // Optional structured plan: extract conditions and normalized values up front
+    // so the UI can show detailed processing steps.
+    let mut showed_plan = false;
+    if enable_plan {
+        let (plan, plan_tokens) = generate_query_plan(state, &req.content).await;
+        total_input_tokens += plan_tokens.input_tokens;
+        total_output_tokens += plan_tokens.output_tokens;
+        if let Some(plan) = plan {
+            if !plan.conditions.is_empty() {
+                emit(step_event(
+                    "extract",
+                    "조회 조건 추출",
+                    Some(format_plan_items(&plan.conditions)),
+                    StepPhase::Done,
+                ));
+                showed_plan = true;
+            }
+            if !plan.normalized.is_empty() {
+                emit(step_event(
+                    "normalize",
+                    "기준값 변환",
+                    Some(format_plan_items(&plan.normalized)),
+                    StepPhase::Done,
+                ));
+                showed_plan = true;
+            }
+        }
+    }
+
+    // Round-0 reasoning label: when a plan was shown, this round writes the query;
+    // otherwise it does the initial analysis.
+    let round0_label = if showed_plan {
+        "조회 쿼리 작성"
+    } else {
+        "질문 분석 · 조회 조건 구성"
+    };
 
     for round in 0..MAX_TOOL_ROUNDS {
+        // Announce the LLM reasoning step for this round.
+        if round == 0 {
+            emit(step_event("analyze", round0_label, None, StepPhase::Active));
+        } else if used_tool_last_round {
+            emit(step_event(
+                "review",
+                "조회 결과 분석",
+                None,
+                StepPhase::Active,
+            ));
+        }
+
         let llm_request = LlmRequest {
             system_prompt: system_prompt.clone(),
             messages: messages.clone(),
@@ -466,6 +776,32 @@ async fn execute_agent_query(
                 content: assistant_content,
             });
 
+            // Mark this round's reasoning step done and announce the DB query.
+            let (analysis_id, analysis_label) = if round == 0 {
+                ("analyze", round0_label)
+            } else {
+                ("review", "조회 결과 분석")
+            };
+            emit(step_event(analysis_id, analysis_label, None, StepPhase::Done));
+
+            let mut tool_descs: Vec<String> = tool_uses
+                .iter()
+                .map(|(_, name, _)| tool_friendly_name(name).to_string())
+                .collect();
+            tool_descs.sort();
+            tool_descs.dedup();
+            let query_detail = if tool_descs.is_empty() {
+                None
+            } else {
+                Some(tool_descs.join(", "))
+            };
+            emit(step_event(
+                "query",
+                "회사 DB 조회",
+                query_detail.clone(),
+                StepPhase::Active,
+            ));
+
             // Execute each tool and collect results
             let mut tool_results: Vec<ContentBlock> = Vec::new();
             let tool_ctx = ToolContext {
@@ -506,6 +842,10 @@ async fn execute_agent_query(
                 });
             }
 
+            // Mark the DB query step done; results are received.
+            emit(step_event("query", "회사 DB 조회", query_detail, StepPhase::Done));
+            used_tool_last_round = true;
+
             // Add tool results as user message
             messages.push(ClaudeMessage {
                 role: "user".to_string(),
@@ -516,7 +856,16 @@ async fn execute_agent_query(
             continue;
         }
 
-        // stop_reason is "end_turn" or other — extract final text
+        // stop_reason is "end_turn" or other — mark the reasoning step done and
+        // compose the final answer.
+        let (analysis_id, analysis_label) = if round == 0 {
+            ("analyze", round0_label)
+        } else {
+            ("review", "조회 결과 분석")
+        };
+        emit(step_event(analysis_id, analysis_label, None, StepPhase::Done));
+        emit(step_event("compose", "최종 답변 생성", None, StepPhase::Active));
+
         for block in &resp.content {
             if let ContentBlock::Text { text } = block {
                 if !final_text.is_empty() {
@@ -525,7 +874,66 @@ async fn execute_agent_query(
                 final_text.push_str(text);
             }
         }
+        emit(step_event("compose", "최종 답변 생성", None, StepPhase::Done));
         break;
+    }
+
+    // The tool loop may exhaust MAX_TOOL_ROUNDS without ever producing a text
+    // answer (the model kept calling tools). Force one final call with no tools
+    // so it must synthesize an answer from the data already gathered.
+    if final_text.trim().is_empty() {
+        emit(step_event("compose", "최종 답변 생성", None, StepPhase::Active));
+        // Nudge the model to stop calling tools and just answer, which avoids
+        // leaking raw function-call syntax into the text channel.
+        let mut synth_messages = messages.clone();
+        synth_messages.push(ClaudeMessage {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "지금까지 조회한 결과만으로 최종 답변을 작성하세요. 도구를 더 호출하지 말고, \
+                       함수 호출 구문이나 JSON을 출력하지 말고, 한국어 마크다운으로 사용자에게 보여줄 \
+                       최종 답변만 작성하세요."
+                    .to_string(),
+            }],
+        });
+        let llm_request = LlmRequest {
+            system_prompt: system_prompt.clone(),
+            messages: synth_messages,
+            tools: vec![],
+            max_tokens: state.llm_config.max_tokens,
+            temperature: Some(state.llm_config.temperature),
+            cacheable: false,
+        };
+        let resp = if state.llm_provider == "openai" {
+            match &state.openai_client {
+                Some(client) => client.send_message(&llm_request).await.ok(),
+                None => None,
+            }
+        } else {
+            state.claude_client.send_message(&llm_request).await.ok()
+        };
+        if let Some(resp) = resp {
+            total_input_tokens += resp.usage.input_tokens;
+            total_output_tokens += resp.usage.output_tokens;
+            for block in &resp.content {
+                if let ContentBlock::Text { text } = block {
+                    if !final_text.is_empty() {
+                        final_text.push('\n');
+                    }
+                    final_text.push_str(text);
+                }
+            }
+        }
+        emit(step_event("compose", "최종 답변 생성", None, StepPhase::Done));
+    }
+
+    // Strip any leaked tool-call artifacts from the answer text.
+    final_text = sanitize_answer(&final_text);
+
+    // Safety net: never return a completely empty answer.
+    if final_text.trim().is_empty() {
+        final_text =
+            "죄송합니다. 요청하신 내용에 대한 답변을 생성하지 못했습니다. 질문을 더 구체적으로 작성해 주시면 다시 시도하겠습니다."
+                .to_string();
     }
 
     // Store the assistant response
@@ -1125,6 +1533,62 @@ async fn query_home(
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
+    let noop = |_: ProcessEvent| {};
+    run_query_pipeline(&state, &req, session_id, &noop, false)
+        .await
+        .map(Json)
+}
+
+/// POST /api/query/stream - same smart-router pipeline as `query_home`, but emits
+/// progress events as NDJSON (one JSON object per line) so the frontend can show
+/// the live processing steps. The terminal line is `{"type":"final", ...QueryResponse}`.
+async fn query_home_stream(
+    State(state): State<AppState>,
+    Json(req): Json<QueryRequest>,
+) -> axum::response::Response {
+    use axum::body::{Body, Bytes};
+    use tokio_stream::wrappers::UnboundedReceiverStream;
+
+    let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
+    let (tx, rx) =
+        tokio::sync::mpsc::unbounded_channel::<Result<Bytes, std::convert::Infallible>>();
+
+    tokio::spawn(async move {
+        let emit = {
+            let tx = tx.clone();
+            move |event: ProcessEvent| {
+                if let Some(line) = to_ndjson_line(&event) {
+                    let _ = tx.send(Ok(Bytes::from(line)));
+                }
+            }
+        };
+
+        match run_query_pipeline(&state, &req, session_id, &emit, true).await {
+            Ok(resp) => emit(ProcessEvent::Final(resp)),
+            Err((_status, Json(body))) => {
+                emit(ProcessEvent::Error { message: body.error })
+            }
+        }
+    });
+
+    let stream = UnboundedReceiverStream::new(rx);
+    axum::response::Response::builder()
+        .header(header::CONTENT_TYPE, "application/x-ndjson")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(stream))
+        .expect("failed to build streaming response")
+}
+
+/// Core smart-router pipeline shared by the buffered (`query_home`) and streaming
+/// (`query_home_stream`) endpoints. `emit` receives progress events as they occur;
+/// pass a no-op closure for the non-streaming path.
+async fn run_query_pipeline(
+    state: &AppState,
+    req: &QueryRequest,
+    session_id: Uuid,
+    emit: &(impl Fn(ProcessEvent) + Send + Sync),
+    stream: bool,
+) -> Result<QueryResponse, (StatusCode, Json<ErrorResponse>)> {
     let conv_store = state.conversation_store.clone();
 
     info!(
@@ -1143,11 +1607,32 @@ async fn query_home(
         .append_message(&session_id, Message::user(&req.content))
         .await;
 
-    let (decision, routing_tokens) = determine_routing_decision(&state, &req).await;
+    emit(step_event("intent", "질문 의도 파악", None, StepPhase::Active));
+    let (decision, routing_tokens) = determine_routing_decision(state, req).await;
+    emit(step_event("intent", "질문 의도 파악", None, StepPhase::Done));
+
+    // Report the routed agents (by display name) before answer generation.
+    let routed_display_ids = if decision.agent_ids.len() <= 1 {
+        vec![decision.primary_agent_id.clone()]
+    } else {
+        decision.agent_ids.clone()
+    };
+    let routed_display_names = routed_display_ids
+        .iter()
+        .map(|id| agent_display_name(id).to_string())
+        .collect::<Vec<_>>();
+    emit(step_event(
+        "routing",
+        "담당 에이전트 선정",
+        Some(routed_display_names.join(" + ")),
+        StepPhase::Done,
+    ));
 
     // Single-agent smart route.
     if decision.agent_ids.len() <= 1 {
-        let result = execute_agent_query(&state, &decision.primary_agent_id, &req, session_id).await?;
+        let result =
+            execute_agent_query(state, &decision.primary_agent_id, req, session_id, emit, stream)
+                .await?;
         // Persist the assistant response.
         let _ = conv_store
             .append_message(&session_id, Message::assistant(&result.response))
@@ -1170,7 +1655,7 @@ async fn query_home(
             "Smart route resolved to single agent"
         );
 
-        return Ok(Json(QueryResponse {
+        return Ok(QueryResponse {
             session_id,
             agent_id: result.agent_id,
             response: result.response,
@@ -1178,24 +1663,47 @@ async fn query_home(
             token_usage,
             route_kind: "smart_single".to_string(),
             routed_agent_ids: response_routed_agent_ids,
-        }));
+        });
     }
 
-    // Multi-agent route: run each agent, then synthesize.
+    // Multi-agent route: run each agent, then synthesize. Per-agent steps are
+    // coarse (one step per agent) to keep the timeline readable.
+    let noop = |_: ProcessEvent| {};
     let mut total_tokens = routing_tokens;
     let mut all_tools_used = Vec::new();
     let mut results = Vec::new();
 
     for agent_id in &decision.agent_ids {
-        let result = execute_agent_query(&state, agent_id, &req, session_id).await?;
+        let agent_name = agent_display_name(agent_id);
+        let step_id = format!("agent-{agent_id}");
+        emit(step_event(
+            &step_id,
+            &format!("{agent_name} 처리"),
+            None,
+            StepPhase::Active,
+        ));
+        let result = execute_agent_query(state, agent_id, req, session_id, &noop, false).await?;
+        emit(step_event(
+            &step_id,
+            &format!("{agent_name} 처리"),
+            None,
+            StepPhase::Done,
+        ));
         add_token_usage(&mut total_tokens, &result.token_usage);
         all_tools_used.extend(result.tools_used.iter().cloned());
         results.push(result);
     }
 
+    emit(step_event(
+        "compose",
+        "통합 답변 생성",
+        None,
+        StepPhase::Active,
+    ));
     let (summary_text, summary_tokens) =
-        compose_multi_agent_response(&state, &req.content, &decision, &results).await;
+        compose_multi_agent_response(state, &req.content, &decision, &results).await;
     add_token_usage(&mut total_tokens, &summary_tokens);
+    emit(step_event("compose", "통합 답변 생성", None, StepPhase::Done));
 
     let _ = conv_store
         .append_message(&session_id, Message::assistant(&summary_text))
@@ -1230,7 +1738,7 @@ async fn query_home(
         "Smart route resolved to multiple agents"
     );
 
-    Ok(Json(QueryResponse {
+    Ok(QueryResponse {
         session_id,
         agent_id: primary_agent_id,
         response: summary_text,
@@ -1238,7 +1746,7 @@ async fn query_home(
         token_usage: total_tokens,
         route_kind: "multi_agent".to_string(),
         routed_agent_ids: response_routed_agent_ids,
-    }))
+    })
 }
 
 /// GET /api/sessions/:session_id/history - Get conversation history for a session
@@ -1527,7 +2035,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/health", get(health_check))
         .route("/api/agents", get(list_agents))
         .route("/api/query", post(query_home))
+        .route("/api/query/stream", post(query_home_stream))
         .route("/api/agents/:agent_id/query", post(query_agent))
+        .route("/api/agents/:agent_id/query/stream", post(query_agent_stream))
         .route("/api/sessions/:session_id/history", get(get_session_history))
         .route("/api/sessions/:session_id/summarize", get(summarize_session))
         .route("/api/tools", get(list_tools))

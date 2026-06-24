@@ -2,16 +2,19 @@ use web_sys::{Element, ScrollBehavior, ScrollIntoViewOptions};
 use yew::prelude::*;
 
 use crate::components::input::ChatInput;
-use crate::components::message::{MessageBubble, TypingIndicator};
+use crate::components::message::{MessageBubble, ProcessSteps, TypingIndicator};
 use crate::components::suggestions::Suggestions;
 use crate::types::{
     AgentMeta, BoardPostCompletion, BoardPostTarget, ChatMessage, ChatMessageUi, MessageRole,
+    ProcessStep,
 };
 
 #[derive(Properties, PartialEq)]
 pub struct ChatProps {
     pub messages: Vec<ChatMessage>,
     pub is_loading: bool,
+    #[prop_or_default]
+    pub live_steps: Vec<ProcessStep>,
     pub on_send: Callback<String>,
     pub on_regenerate: Callback<String>,
     pub on_select_response_page: Callback<(String, usize)>,
@@ -209,7 +212,21 @@ pub fn chat_area(props: &ChatProps) -> Html {
                         }
                     })}
                     if props.is_loading {
-                        <TypingIndicator />
+                        if !props.live_steps.is_empty() {
+                            <div class="message-row assistant">
+                                <div class="message-avatar">{ "AI" }</div>
+                                <div class="process-steps-live">
+                                    <ProcessSteps steps={props.live_steps.clone()} is_live=true />
+                                    <div class="typing-indicator">
+                                        <div class="typing-dot"></div>
+                                        <div class="typing-dot"></div>
+                                        <div class="typing-dot"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        } else {
+                            <TypingIndicator />
+                        }
                     }
                     <div ref={messages_end_ref}></div>
                 </div>

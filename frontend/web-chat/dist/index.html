@@ -6,8 +6,8 @@
     <title>Core Agentic AI — EHS AI 채팅</title>
     
 <script type="module">
-import init, * as bindings from '/pekko-agent-web-chat-260cb9e37e670146.js';
-const wasm = await init({ module_or_path: '/pekko-agent-web-chat-260cb9e37e670146_bg.wasm' });
+import init, * as bindings from '/pekko-agent-web-chat-48eea7557f5ca6de.js';
+const wasm = await init({ module_or_path: '/pekko-agent-web-chat-48eea7557f5ca6de_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -1020,6 +1020,131 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         }
       }
 
+      /* ── Process steps ("답변 과정 보기") ── */
+      .process-steps {
+        margin-bottom: 8px;
+      }
+      .process-steps-live {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        align-items: flex-start;
+        width: fit-content;
+      }
+      .process-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 10px;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--text-secondary, #64748b);
+        background: var(--assistant-bubble);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        cursor: pointer;
+        transition: background 0.15s ease, color 0.15s ease;
+      }
+      .process-toggle:hover {
+        color: var(--user-bubble, #3b82f6);
+        border-color: var(--user-bubble, #3b82f6);
+      }
+      .process-timeline {
+        margin-top: 8px;
+        padding: 4px 4px 4px 2px;
+        display: flex;
+        flex-direction: column;
+        width: fit-content;
+        max-width: 100%;
+      }
+      .timeline-step {
+        display: flex;
+        gap: 10px;
+      }
+      .timeline-marker {
+        position: relative;
+        width: 12px;
+        flex-shrink: 0;
+        display: flex;
+        justify-content: center;
+      }
+      .timeline-dot {
+        width: 9px;
+        height: 9px;
+        margin-top: 4px;
+        border-radius: 50%;
+        border: 2px solid var(--border);
+        background: var(--assistant-bubble);
+        box-sizing: border-box;
+        z-index: 1;
+      }
+      /* connector line between dots */
+      .timeline-step:not(:last-child) .timeline-marker::after {
+        content: "";
+        position: absolute;
+        left: 50%;
+        top: 13px;
+        height: calc(100% - 13px);
+        width: 2px;
+        transform: translateX(-50%);
+        background: var(--border);
+      }
+      .timeline-content {
+        display: flex;
+        flex-direction: column;
+        padding-bottom: 14px;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .timeline-step:last-child .timeline-content {
+        padding-bottom: 0;
+      }
+      .timeline-label {
+        color: var(--text-secondary, #64748b);
+      }
+      .timeline-detail {
+        margin-top: 1px;
+        font-size: 12px;
+        color: var(--assistant-text);
+        font-weight: 500;
+      }
+      /* done: filled accent dot */
+      .timeline-step.done .timeline-dot {
+        background: var(--user-bubble, #3b82f6);
+        border-color: var(--user-bubble, #3b82f6);
+      }
+      .timeline-step.done .timeline-label {
+        color: var(--assistant-text);
+      }
+      /* active: filled dot with pulsing ring */
+      .timeline-step.active .timeline-dot {
+        background: var(--user-bubble, #3b82f6);
+        border-color: var(--user-bubble, #3b82f6);
+        animation: timeline-pulse 1.4s ease-in-out infinite;
+      }
+      .timeline-step.active .timeline-label {
+        color: var(--user-bubble, #3b82f6);
+        font-weight: 600;
+      }
+      /* pending: hollow muted dot */
+      .timeline-step.pending .timeline-dot {
+        opacity: 0.5;
+      }
+      .timeline-step.pending .timeline-label {
+        opacity: 0.6;
+      }
+      @keyframes timeline-pulse {
+        0% {
+          box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.45);
+        }
+        70% {
+          box-shadow: 0 0 0 5px rgba(59, 130, 246, 0);
+        }
+        100% {
+          box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+        }
+      }
+
       /* ── Suggestions ── */
       .suggestions-container {
         display: flex;
@@ -1286,6 +1411,131 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         }
         30% {
           transform: translateY(-6px);
+        }
+      }
+
+      /* ── Process steps ("답변 과정 보기") ── */
+      .process-steps {
+        margin-bottom: 8px;
+      }
+      .process-steps-live {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        align-items: flex-start;
+        width: fit-content;
+      }
+      .process-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 10px;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--text-secondary, #64748b);
+        background: var(--assistant-bubble);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        cursor: pointer;
+        transition: background 0.15s ease, color 0.15s ease;
+      }
+      .process-toggle:hover {
+        color: var(--user-bubble, #3b82f6);
+        border-color: var(--user-bubble, #3b82f6);
+      }
+      .process-timeline {
+        margin-top: 8px;
+        padding: 4px 4px 4px 2px;
+        display: flex;
+        flex-direction: column;
+        width: fit-content;
+        max-width: 100%;
+      }
+      .timeline-step {
+        display: flex;
+        gap: 10px;
+      }
+      .timeline-marker {
+        position: relative;
+        width: 12px;
+        flex-shrink: 0;
+        display: flex;
+        justify-content: center;
+      }
+      .timeline-dot {
+        width: 9px;
+        height: 9px;
+        margin-top: 4px;
+        border-radius: 50%;
+        border: 2px solid var(--border);
+        background: var(--assistant-bubble);
+        box-sizing: border-box;
+        z-index: 1;
+      }
+      /* connector line between dots */
+      .timeline-step:not(:last-child) .timeline-marker::after {
+        content: "";
+        position: absolute;
+        left: 50%;
+        top: 13px;
+        height: calc(100% - 13px);
+        width: 2px;
+        transform: translateX(-50%);
+        background: var(--border);
+      }
+      .timeline-content {
+        display: flex;
+        flex-direction: column;
+        padding-bottom: 14px;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .timeline-step:last-child .timeline-content {
+        padding-bottom: 0;
+      }
+      .timeline-label {
+        color: var(--text-secondary, #64748b);
+      }
+      .timeline-detail {
+        margin-top: 1px;
+        font-size: 12px;
+        color: var(--assistant-text);
+        font-weight: 500;
+      }
+      /* done: filled accent dot */
+      .timeline-step.done .timeline-dot {
+        background: var(--user-bubble, #3b82f6);
+        border-color: var(--user-bubble, #3b82f6);
+      }
+      .timeline-step.done .timeline-label {
+        color: var(--assistant-text);
+      }
+      /* active: filled dot with pulsing ring */
+      .timeline-step.active .timeline-dot {
+        background: var(--user-bubble, #3b82f6);
+        border-color: var(--user-bubble, #3b82f6);
+        animation: timeline-pulse 1.4s ease-in-out infinite;
+      }
+      .timeline-step.active .timeline-label {
+        color: var(--user-bubble, #3b82f6);
+        font-weight: 600;
+      }
+      /* pending: hollow muted dot */
+      .timeline-step.pending .timeline-dot {
+        opacity: 0.5;
+      }
+      .timeline-step.pending .timeline-label {
+        opacity: 0.6;
+      }
+      @keyframes timeline-pulse {
+        0% {
+          box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.45);
+        }
+        70% {
+          box-shadow: 0 0 0 5px rgba(59, 130, 246, 0);
+        }
+        100% {
+          box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
         }
       }
 
@@ -3285,7 +3535,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         });
       }
     </script>
-  <link rel="modulepreload" href="/pekko-agent-web-chat-260cb9e37e670146.js" crossorigin="anonymous" integrity="sha384-45K9whMrRDQZi11DzXPnMROoJHM6z2kuPR27jEC3bP9NtKAaL/Yo729VwSmZDmxR"><link rel="preload" href="/pekko-agent-web-chat-260cb9e37e670146_bg.wasm" crossorigin="anonymous" integrity="sha384-YIJVO6Q7NNQ+DMniKO30z7eC2nmZ/zluBtEM7yzdbA14/P0czQmxbzwyp/UZDxLn" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/pekko-agent-web-chat-48eea7557f5ca6de.js" crossorigin="anonymous" integrity="sha384-TjUVLkNGucAFRZ89ZelgnBTpnajCnMKKe8otoj+EmljODGlWeJmjCc/5bI8ANPTW"><link rel="preload" href="/pekko-agent-web-chat-48eea7557f5ca6de_bg.wasm" crossorigin="anonymous" integrity="sha384-X2pSzJGL4PJzjPIK6z2kql+g9EAqkL/mqKflbI5eD4gf1bsnJ5/PZneVgRqHx86X" as="fetch" type="application/wasm"></head>
   <body><script>"use strict";
 
 (function () {

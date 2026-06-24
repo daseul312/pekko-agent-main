@@ -33,6 +33,41 @@ pub struct QueryResponse {
     pub old_new_comparison: Option<OldNewComparison>,
 }
 
+/// Live progress event streamed from the `/stream` endpoints (NDJSON).
+/// `Step` is a generic, upsert-by-label progress item.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProcessEvent {
+    Step {
+        label: String,
+        #[serde(default)]
+        detail: Option<String>,
+        status: StepStatus,
+    },
+    Final(QueryResponse),
+    Error { message: String },
+}
+
+/// Status of a single processing step shown in the "답변 과정 보기" panel.
+/// `snake_case` to match the backend wire values ("active"/"done").
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    Pending,
+    Active,
+    Done,
+}
+
+/// A single processing step (e.g. "질문 의도 파악"). `detail` carries extra info
+/// such as the routed agent names ("점검관리 + 교육 관리").
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessStep {
+    pub label: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+    pub status: StepStatus,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TokenUsage {
     pub input_tokens: u32,
@@ -244,6 +279,10 @@ pub struct ChatMessage {
     pub ui: Option<ChatMessageUi>,
     #[serde(default)]
     pub board_post_target: Option<BoardPostTarget>,
+    /// Processing steps captured while this answer was generated (streaming).
+    /// `#[serde(default)]` keeps older persisted sessions deserializable.
+    #[serde(default)]
+    pub process_steps: Vec<ProcessStep>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

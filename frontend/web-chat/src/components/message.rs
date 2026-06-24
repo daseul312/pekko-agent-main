@@ -7,7 +7,7 @@ use crate::components::board_post::{BoardPostFlow, BoardPostMenuForm};
 use crate::markdown;
 use crate::types::{
     BoardPostCompletion, BoardPostTarget, ChatMessage, ChatMessageUi, MessageRole,
-    OldNewArticleComparison, OldNewComparison, OldNewLawInfo,
+    OldNewArticleComparison, OldNewComparison, OldNewLawInfo, ProcessStep, StepStatus,
 };
 
 #[wasm_bindgen]
@@ -286,6 +286,9 @@ pub fn message_bubble(props: &MessageProps) -> Html {
         <div class={classes!("message-row", role_class, has_law_compare.then_some("has-law-compare"))}>
             <div class="message-avatar">{ avatar }</div>
             <div>
+                if is_assistant && !msg.process_steps.is_empty() {
+                    <ProcessSteps steps={msg.process_steps.clone()} is_live=false />
+                }
                 { content_html }
                 { law_compare_html }
                 <div class="message-actions">
@@ -537,6 +540,61 @@ pub fn typing_indicator() -> Html {
                 <div class="typing-dot"></div>
                 <div class="typing-dot"></div>
             </div>
+        </div>
+    }
+}
+
+#[derive(Properties, PartialEq)]
+pub struct ProcessStepsProps {
+    pub steps: Vec<ProcessStep>,
+    /// `true` while the answer is still streaming (default expanded look may differ).
+    #[prop_or_default]
+    pub is_live: bool,
+}
+
+/// Collapsible "답변 과정 보기" panel showing the live/captured processing steps.
+#[function_component(ProcessSteps)]
+pub fn process_steps(props: &ProcessStepsProps) -> Html {
+    let expanded = use_state(|| false);
+
+    let on_toggle = {
+        let expanded = expanded.clone();
+        Callback::from(move |_| expanded.set(!*expanded))
+    };
+
+    let arrow = if *expanded { "▲" } else { "▼" };
+
+    let steps_html = props.steps.iter().map(|step| {
+        let status_class = match step.status {
+            StepStatus::Pending => "pending",
+            StepStatus::Active => "active",
+            StepStatus::Done => "done",
+        };
+        html! {
+            <div class={classes!("timeline-step", status_class)}>
+                <div class="timeline-marker">
+                    <span class="timeline-dot"></span>
+                </div>
+                <div class="timeline-content">
+                    <span class="timeline-label">{ &step.label }</span>
+                    if let Some(detail) = &step.detail {
+                        <span class="timeline-detail">{ detail }</span>
+                    }
+                </div>
+            </div>
+        }
+    }).collect::<Html>();
+
+    html! {
+        <div class="process-steps">
+            <button type="button" class="process-toggle" onclick={on_toggle}>
+                { format!("답변 과정 보기 {arrow}") }
+            </button>
+            if *expanded {
+                <div class="process-timeline">
+                    { steps_html }
+                </div>
+            }
         </div>
     }
 }

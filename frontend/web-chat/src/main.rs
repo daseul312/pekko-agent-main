@@ -16,8 +16,8 @@ use components::input::ChatInput;
 use components::sidebar::Sidebar;
 use types::{
     AgentMeta, AuthUser, BoardPostCompletion, ChatMessage, ChatMessageUi, ChatSession, MessageRole,
-    OldNewComparison, ResponseVersion, TokenUsage, BOARD_POST_ANALYZING_AGENT_ID,
-    COMPLIANCE_AGENT_ID,
+    OldNewComparison, ProcessEvent, ProcessStep, ResponseVersion, TokenUsage,
+    BOARD_POST_ANALYZING_AGENT_ID, COMPLIANCE_AGENT_ID,
 };
 
 const AUTH_STORAGE_KEY: &str = "pekko_auth_user";
@@ -186,6 +186,7 @@ fn build_user_message(content: String, request_content: String) -> ChatMessage {
         current_response_index: 0,
         ui: None,
         board_post_target: None,
+        process_steps: Vec::new(),
     }
 }
 
@@ -220,6 +221,7 @@ fn build_assistant_message(version: ResponseVersion) -> ChatMessage {
         current_response_index: 0,
         ui: None,
         board_post_target: None,
+        process_steps: Vec::new(),
     }
 }
 
@@ -238,6 +240,7 @@ fn build_board_post_menu_message() -> ChatMessage {
         current_response_index: 0,
         ui: Some(ChatMessageUi::BoardPostMenu),
         board_post_target: None,
+        process_steps: Vec::new(),
     }
 }
 
@@ -256,6 +259,7 @@ fn build_board_post_edit_menu_message() -> ChatMessage {
         current_response_index: 0,
         ui: Some(ChatMessageUi::BoardPostEditMenu),
         board_post_target: None,
+        process_steps: Vec::new(),
     }
 }
 
@@ -274,6 +278,7 @@ fn build_board_post_delete_menu_message() -> ChatMessage {
         current_response_index: 0,
         ui: Some(ChatMessageUi::BoardPostDeleteMenu),
         board_post_target: None,
+        process_steps: Vec::new(),
     }
 }
 
@@ -292,6 +297,7 @@ fn build_board_post_auth_required_message() -> ChatMessage {
         current_response_index: 0,
         ui: None,
         board_post_target: None,
+        process_steps: Vec::new(),
     }
 }
 
@@ -310,6 +316,7 @@ fn build_board_post_result_message(completion: BoardPostCompletion) -> ChatMessa
         current_response_index: 0,
         ui: None,
         board_post_target: None,
+        process_steps: Vec::new(),
     }
 }
 
@@ -474,12 +481,39 @@ fn apply_local_messages(
     sessions.set(current_sessions);
 }
 
+/// Apply a streamed `ProcessEvent` to the running list of processing steps,
+/// upserting each step by its label so repeated events update in place.
+fn apply_process_event(steps: &mut Vec<ProcessStep>, event: &ProcessEvent) {
+    match event {
+        ProcessEvent::Step {
+            label,
+            detail,
+            status,
+        } => {
+            if let Some(step) = steps.iter_mut().find(|step| &step.label == label) {
+                step.status = status.clone();
+                if detail.is_some() {
+                    step.detail = detail.clone();
+                }
+            } else {
+                steps.push(ProcessStep {
+                    label: label.clone(),
+                    detail: detail.clone(),
+                    status: status.clone(),
+                });
+            }
+        }
+        ProcessEvent::Final(_) | ProcessEvent::Error { .. } => {}
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn submit_query(
     messages: UseStateHandle<Vec<ChatMessage>>,
     session_id: UseStateHandle<Option<Uuid>>,
     sessions: UseStateHandle<Vec<ChatSession>>,
     is_loading: UseStateHandle<bool>,
+    live_steps: UseStateHandle<Vec<ProcessStep>>,
     selected_agent_id: UseStateHandle<Option<String>>,
     use_router: UseStateHandle<bool>,
     active_routed_agent_ids: UseStateHandle<Vec<String>>,
@@ -496,11 +530,14 @@ fn submit_query(
 
     messages.set(current_msgs.clone());
     is_loading.set(true);
+    live_steps.set(Vec::new());
 
     let messages_clone = messages.clone();
     let session_id_clone = session_id.clone();
     let sessions_clone = sessions.clone();
     let is_loading_clone = is_loading.clone();
+    let live_steps_clone = live_steps.clone();
+    let live_steps_event = live_steps.clone();
     let selected_agent_id_clone = selected_agent_id.clone();
     let use_router_clone = use_router.clone();
     let active_routed_agent_ids_clone = active_routed_agent_ids.clone();
@@ -517,24 +554,56 @@ fn submit_query(
     let active_agent_id = (*selected_agent_id).clone();
 
     spawn_local(async move {
-        let result = if route_via_router {
-            api::send_query(
-                None,
+        // `final_steps` captures the processing steps from the streaming router
+        // path so they can be persisted onto the completed assistant message.
+        let mut final_steps: Vec<ProcessStep> = Vec::new();
+
+        // Route via the smart router (no specific agent) or directly to the
+        // selected agent. Both paths stream live processing steps.
+        let agent_id_opt: Option<String> = if route_via_router {
+            None
+        } else {
+            active_agent_id.clone()
+        };
+
+        let result = if route_via_router || agent_id_opt.is_some() {
+            let steps_acc =
+                std::rc::Rc::new(std::cell::RefCell::new(Vec::<ProcessStep>::new()));
+            let on_event = {
+                let steps_acc = steps_acc.clone();
+                let live_steps_event = live_steps_event.clone();
+                move |event: ProcessEvent| {
+                    {
+                        let mut acc = steps_acc.borrow_mut();
+                        apply_process_event(&mut acc, &event);
+                    }
+                    live_steps_event.set(steps_acc.borrow().clone());
+                }
+            };
+            let res = api::send_query_stream(
+                agent_id_opt.as_deref(),
                 &request_content,
                 sid,
-                None,
                 session_owner_token.as_deref(),
+                on_event,
             )
-            .await
-        } else if let Some(agent_id) = active_agent_id.as_deref() {
-            api::send_query(
-                Some(agent_id),
-                &request_content,
-                sid,
-                None,
-                session_owner_token.as_deref(),
-            )
-            .await
+            .await;
+            final_steps = steps_acc.borrow().clone();
+            // Fallback: if streaming failed before producing any step (e.g. the
+            // stream endpoint is unavailable), retry with the buffered endpoint
+            // so answers still work (without the live steps).
+            if res.is_err() && final_steps.is_empty() {
+                api::send_query(
+                    agent_id_opt.as_deref(),
+                    &request_content,
+                    sid,
+                    None,
+                    session_owner_token.as_deref(),
+                )
+                .await
+            } else {
+                res
+            }
         } else {
             Err("No agent selected".to_string())
         };
@@ -568,10 +637,14 @@ fn submit_query(
                             target_id,
                             response_version.clone(),
                         ) {
-                            msgs.push(build_assistant_message(response_version));
+                            let mut assistant_msg = build_assistant_message(response_version);
+                            assistant_msg.process_steps = final_steps.clone();
+                            msgs.push(assistant_msg);
                         }
                     } else {
-                        msgs.push(build_assistant_message(response_version));
+                        let mut assistant_msg = build_assistant_message(response_version);
+                        assistant_msg.process_steps = final_steps.clone();
+                        msgs.push(assistant_msg);
                     }
                 }
 
@@ -655,6 +728,7 @@ fn submit_query(
                         current_response_index: 0,
                         ui: None,
                         board_post_target: None,
+                        process_steps: Vec::new(),
                     };
                     let mut msgs = current_msgs.clone();
                     msgs.push(err_msg);
@@ -663,6 +737,7 @@ fn submit_query(
             }
         }
         is_loading_clone.set(false);
+        live_steps_clone.set(Vec::new());
     });
 }
 
@@ -747,6 +822,7 @@ fn app() -> Html {
     let sessions =
         use_state(|| LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY).unwrap_or_default());
     let is_loading = use_state(|| false);
+    let live_steps = use_state(Vec::<ProcessStep>::new);
     let health_status = use_state(|| Option::<String>::None);
     let use_router = use_state(|| false);
     let active_routed_agent_ids = use_state(Vec::<String>::new);
@@ -1171,6 +1247,7 @@ fn app() -> Html {
         let session_id = session_id.clone();
         let sessions = sessions.clone();
         let is_loading = is_loading.clone();
+        let live_steps = live_steps.clone();
         let selected_agent_id = selected_agent_id.clone();
         let use_router = use_router.clone();
         let active_routed_agent_ids = active_routed_agent_ids.clone();
@@ -1277,6 +1354,7 @@ fn app() -> Html {
                 session_id.clone(),
                 sessions.clone(),
                 is_loading.clone(),
+                live_steps.clone(),
                 selected_agent_id.clone(),
                 use_router.clone(),
                 active_routed_agent_ids.clone(),
@@ -1296,6 +1374,7 @@ fn app() -> Html {
         let session_id = session_id.clone();
         let sessions = sessions.clone();
         let is_loading = is_loading.clone();
+        let live_steps = live_steps.clone();
         let selected_agent_id = selected_agent_id.clone();
         let use_router = use_router.clone();
         let active_routed_agent_ids = active_routed_agent_ids.clone();
@@ -1318,6 +1397,7 @@ fn app() -> Html {
                 session_id.clone(),
                 sessions.clone(),
                 is_loading.clone(),
+                live_steps.clone(),
                 selected_agent_id.clone(),
                 use_router.clone(),
                 active_routed_agent_ids.clone(),
@@ -1477,6 +1557,7 @@ fn app() -> Html {
                     <ChatArea
                         messages={(*messages).clone()}
                         is_loading={*is_loading}
+                        live_steps={(*live_steps).clone()}
                         on_send={on_send.clone()}
                         on_regenerate={on_regenerate.clone()}
                         on_select_response_page={on_select_response_page.clone()}
@@ -1502,6 +1583,7 @@ fn app() -> Html {
                     <ChatArea
                         messages={(*messages).clone()}
                         is_loading={*is_loading}
+                        live_steps={(*live_steps).clone()}
                         on_send={on_send.clone()}
                         on_regenerate={on_regenerate.clone()}
                         on_select_response_page={on_select_response_page.clone()}
