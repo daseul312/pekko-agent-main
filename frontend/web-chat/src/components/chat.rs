@@ -19,6 +19,8 @@ pub struct ChatProps {
     pub on_regenerate: Callback<String>,
     /// "다른 에이전트로 재시도": (assistant 메시지 id, 선택한 agent id).
     pub on_retry_with_agent: Callback<(String, String)>,
+    /// "질문 수정": (user 메시지 id, 수정된 질문 내용).
+    pub on_edit_message: Callback<(String, String)>,
     pub on_select_response_page: Callback<(String, usize)>,
     pub on_board_post_target_selected: Callback<BoardPostTarget>,
     pub on_board_post_complete: Callback<BoardPostCompletion>,
@@ -206,6 +208,7 @@ pub fn chat_area(props: &ChatProps) -> Html {
                                 message={msg.clone()}
                                 on_regenerate={props.on_regenerate.clone()}
                                 on_retry_with_agent={props.on_retry_with_agent.clone()}
+                                on_edit_message={props.on_edit_message.clone()}
                                 on_select_response_page={props.on_select_response_page.clone()}
                                 on_board_post_target_selected={props.on_board_post_target_selected.clone()}
                                 on_board_post_complete={props.on_board_post_complete.clone()}

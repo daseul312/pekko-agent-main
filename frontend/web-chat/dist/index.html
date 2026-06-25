@@ -6,8 +6,8 @@
     <title>Core Agentic AI — EHS AI 채팅</title>
     
 <script type="module">
-import init, * as bindings from '/pekko-agent-web-chat-1ff819f36a89efb5.js';
-const wasm = await init({ module_or_path: '/pekko-agent-web-chat-1ff819f36a89efb5_bg.wasm' });
+import init, * as bindings from '/pekko-agent-web-chat-64748f8bd909dece.js';
+const wasm = await init({ module_or_path: '/pekko-agent-web-chat-64748f8bd909dece_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -2486,6 +2486,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         margin-top: 6px;
       }
       .copy-btn,
+      .edit-btn,
       .regenerate-btn {
         font-size: 12px;
         padding: 5px 10px;
@@ -2500,6 +2501,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         transition: all 0.15s ease;
       }
       .copy-btn:hover,
+      .edit-btn:hover,
       .regenerate-btn:hover {
         background: var(--accent-soft);
         border-color: var(--accent);
@@ -2507,15 +2509,90 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
       }
 
       .copy-btn:disabled,
+      .edit-btn:disabled,
       .regenerate-btn:disabled {
         opacity: 0.45;
         cursor: not-allowed;
       }
       .copy-btn:disabled:hover,
+      .edit-btn:disabled:hover,
       .regenerate-btn:disabled:hover {
         background: transparent;
         border-color: var(--border);
         color: var(--muted);
+      }
+      /* ── 질문 인라인 수정 에디터 ── */
+      /* 사용자 메시지 액션(수정 버튼)은 우측 정렬 버블에 맞춰 오른쪽으로 */
+      .message-row.user .message-actions {
+        justify-content: flex-end;
+      }
+      .message-row.user .edit-bubble {
+        width: min(560px, calc(100vw - 140px));
+        background: var(--chat-bg);
+        border: 1px solid var(--input-border);
+        border-radius: var(--radius);
+        padding: 12px;
+        box-shadow: 0 4px 16px rgba(59, 130, 246, 0.12);
+        box-sizing: border-box;
+        text-align: left;
+      }
+      .message-row.user .edit-bubble:focus-within {
+        border-color: var(--input-focus);
+      }
+      .edit-textarea {
+        width: 100%;
+        min-height: 52px;
+        resize: vertical;
+        font: inherit;
+        line-height: 1.6;
+        padding: 0;
+        border: none;
+        background: transparent;
+        color: var(--assistant-text);
+        box-sizing: border-box;
+      }
+      .edit-textarea:focus {
+        outline: none;
+      }
+      .edit-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid var(--border);
+      }
+      .edit-save-btn,
+      .edit-cancel-btn {
+        font-size: 12px;
+        font-weight: 600;
+        padding: 6px 14px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .edit-save-btn {
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+      }
+      .edit-save-btn:hover:not(:disabled) {
+        background: var(--accent-hover);
+        border-color: var(--accent-hover);
+      }
+      .edit-save-btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      .edit-cancel-btn {
+        background: transparent;
+        color: var(--muted);
+      }
+      .edit-cancel-btn:hover {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: var(--accent);
       }
       /* ── Routing rationale note (자동 라우팅 근거 한 줄) ── */
       .routing-note {
@@ -3881,6 +3958,6 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         });
       }
     </script>
-  <link rel="modulepreload" href="/pekko-agent-web-chat-1ff819f36a89efb5.js" crossorigin="anonymous" integrity="sha384-td5aX0UBD94BqXgLDaXl4MAHaET2RG5SLT77HSAUnu8g7YzLlZCW9YqGkkgEn8V0"><link rel="preload" href="/pekko-agent-web-chat-1ff819f36a89efb5_bg.wasm" crossorigin="anonymous" integrity="sha384-T+2bjqKiNKL5j43q8bLiVAPhrygd9Z+KPU1nn4wsw1zn8QCQ6uurRpm4qTh+92z3" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/pekko-agent-web-chat-64748f8bd909dece.js" crossorigin="anonymous" integrity="sha384-XsVa1vI9UIxDRtollgVyS1erqVRu+AtqfbRFFiQCmOJrGAdE9NLubz/LuLLIqogV"><link rel="preload" href="/pekko-agent-web-chat-64748f8bd909dece_bg.wasm" crossorigin="anonymous" integrity="sha384-dGkAJLor4xh/QM/v+S33zH11823xCr58F5km5cE2Hv2UvIfKiSunsmE7i2uy6kTr" as="fetch" type="application/wasm"></head>
   <body></body>
 </html>

@@ -1650,6 +1650,59 @@ fn app() -> Html {
         })
     };
 
+    // "질문 수정": 사용자 질문을 새 내용으로 바꿔 다시 보낸다. 그 질문 이후의 대화
+    // (이전 답변 포함)는 모두 버리고 수정된 질문으로 새 답변을 생성한다(ChatGPT 방식).
+    let on_edit_message = {
+        let messages = messages.clone();
+        let session_id = session_id.clone();
+        let sessions = sessions.clone();
+        let is_loading = is_loading.clone();
+        let live_steps = live_steps.clone();
+        let selected_agent_id = selected_agent_id.clone();
+        let use_router = use_router.clone();
+        let active_routed_agent_ids = active_routed_agent_ids.clone();
+        let current_sid_ref = current_sid_ref.clone();
+        Callback::from(move |(message_id, new_content): (String, String)| {
+            if *is_loading {
+                return;
+            }
+            let content = new_content.trim().to_string();
+            if content.is_empty() {
+                return;
+            }
+
+            let all = (*messages).clone();
+            let Some(idx) = all
+                .iter()
+                .position(|m| m.id == message_id && m.role == MessageRole::User)
+            else {
+                return;
+            };
+
+            // 수정 대상 질문과 그 이후 메시지를 모두 버린다.
+            let mut new_msgs = all[..idx].to_vec();
+            let request_content = build_request_content(new_msgs.as_slice(), &content);
+            new_msgs.push(build_user_message(content.clone(), request_content.clone()));
+
+            submit_query(
+                messages.clone(),
+                session_id.clone(),
+                sessions.clone(),
+                is_loading.clone(),
+                live_steps.clone(),
+                selected_agent_id.clone(),
+                use_router.clone(),
+                active_routed_agent_ids.clone(),
+                current_sid_ref.clone(),
+                content,
+                request_content,
+                new_msgs,
+                None,
+                None,
+            );
+        })
+    };
+
     // "다른 에이전트로 재시도": 같은 질문을 사용자가 고른 에이전트로 강제 재요청하고
     // 결과를 새 메시지 버블로 추가한다(regenerate_target_id=None → 새 버블, agent_override=선택).
     let on_retry_with_agent = {
@@ -1888,6 +1941,7 @@ fn app() -> Html {
                         on_send={on_send.clone()}
                         on_regenerate={on_regenerate.clone()}
                         on_retry_with_agent={on_retry_with_agent.clone()}
+                        on_edit_message={on_edit_message.clone()}
                         on_select_response_page={on_select_response_page.clone()}
                         on_board_post_target_selected={on_board_post_target_selected.clone()}
                         on_board_post_complete={on_board_post_complete.clone()}
@@ -1916,6 +1970,7 @@ fn app() -> Html {
                         on_send={on_send.clone()}
                         on_regenerate={on_regenerate.clone()}
                         on_retry_with_agent={on_retry_with_agent.clone()}
+                        on_edit_message={on_edit_message.clone()}
                         on_select_response_page={on_select_response_page.clone()}
                         on_board_post_target_selected={on_board_post_target_selected.clone()}
                         on_board_post_complete={on_board_post_complete.clone()}

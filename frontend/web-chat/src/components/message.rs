@@ -29,6 +29,8 @@ pub struct MessageProps {
     pub on_regenerate: Callback<String>,
     /// "다른 에이전트로 재시도": (assistant 메시지 id, 선택한 agent id).
     pub on_retry_with_agent: Callback<(String, String)>,
+    /// "질문 수정": (user 메시지 id, 수정된 질문 내용).
+    pub on_edit_message: Callback<(String, String)>,
     pub on_select_response_page: Callback<(String, usize)>,
     pub on_board_post_target_selected: Callback<BoardPostTarget>,
     pub on_board_post_complete: Callback<BoardPostCompletion>,
@@ -42,6 +44,9 @@ pub fn message_bubble(props: &MessageProps) -> Html {
     let msg = &props.message;
     let copy_status = use_state(|| CopyStatus::Idle);
     let retry_menu_open = use_state(|| false);
+    let is_editing = use_state(|| false);
+    let edit_value = use_state(|| msg.content.clone());
+    let is_user = matches!(msg.role, MessageRole::User);
     let is_assistant = matches!(msg.role, MessageRole::Assistant);
     let board_post_route_flow = board_post_route_flow(&msg.content);
     let is_rendered_markdown = matches!(msg.role, MessageRole::Assistant | MessageRole::System)
@@ -299,6 +304,110 @@ pub fn message_bubble(props: &MessageProps) -> Html {
         html! {}
     };
 
+    // "질문 수정": 사용자 질문 버블을 인라인 편집으로 전환하는 버튼. 답변 처리 중
+    // (regenerate_disabled = is_loading)에는 비활성화한다.
+    let edit_btn = if is_user && msg.ui.is_none() && !*is_editing {
+        let is_editing = is_editing.clone();
+        let edit_value = edit_value.clone();
+        let content = msg.content.clone();
+        let on_click = Callback::from(move |_: MouseEvent| {
+            edit_value.set(content.clone());
+            is_editing.set(true);
+        });
+        html! {
+            <button
+                class="edit-btn"
+                onclick={on_click}
+                disabled={props.regenerate_disabled}
+                title="질문 수정"
+            >
+                { "✏️ 수정" }
+            </button>
+        }
+    } else {
+        html! {}
+    };
+
+    // 인라인 에디터: 수정된 질문을 전송하면 이후 대화를 지우고 새 답변을 생성한다.
+    let editor_html = {
+        let on_input = {
+            let edit_value = edit_value.clone();
+            Callback::from(move |e: InputEvent| {
+                if let Some(target) = e.target() {
+                    if let Ok(textarea) = target.dyn_into::<web_sys::HtmlTextAreaElement>() {
+                        edit_value.set(textarea.value());
+                    }
+                }
+            })
+        };
+        let on_cancel: Callback<()> = {
+            let is_editing = is_editing.clone();
+            let edit_value = edit_value.clone();
+            let original = msg.content.clone();
+            Callback::from(move |_| {
+                edit_value.set(original.clone());
+                is_editing.set(false);
+            })
+        };
+        let on_save: Callback<()> = {
+            let on_edit_message = props.on_edit_message.clone();
+            let is_editing = is_editing.clone();
+            let edit_value = edit_value.clone();
+            let msg_id = msg.id.clone();
+            let disabled = props.regenerate_disabled;
+            Callback::from(move |_| {
+                if disabled {
+                    return;
+                }
+                let value = (*edit_value).trim().to_string();
+                if value.is_empty() {
+                    return;
+                }
+                is_editing.set(false);
+                on_edit_message.emit((msg_id.clone(), value));
+            })
+        };
+        let on_keydown = {
+            let on_save = on_save.clone();
+            let on_cancel = on_cancel.clone();
+            Callback::from(move |e: web_sys::KeyboardEvent| {
+                if e.key() == "Enter" && (e.ctrl_key() || e.meta_key()) && !e.is_composing() {
+                    e.prevent_default();
+                    on_save.emit(());
+                } else if e.key() == "Escape" {
+                    on_cancel.emit(());
+                }
+            })
+        };
+        let can_save = !(*edit_value).trim().is_empty() && !props.regenerate_disabled;
+
+        html! {
+            <div class="message-bubble edit-bubble">
+                <textarea
+                    class="edit-textarea"
+                    value={(*edit_value).clone()}
+                    oninput={on_input}
+                    onkeydown={on_keydown}
+                />
+                <div class="edit-actions">
+                    <button
+                        class="edit-cancel-btn"
+                        onclick={on_cancel.reform(|_: MouseEvent| ())}
+                    >
+                        { "취소" }
+                    </button>
+                    <button
+                        class="edit-save-btn"
+                        onclick={on_save.reform(|_: MouseEvent| ())}
+                        disabled={!can_save}
+                    >
+                        { "전송" }
+                    </button>
+                </div>
+            </div>
+        }
+    };
+
     let pagination_html = if is_assistant {
         let previous_page = current_page.saturating_sub(1);
         let next_page = (current_page + 1).min(page_count.saturating_sub(1));
@@ -351,10 +460,15 @@ pub fn message_bubble(props: &MessageProps) -> Html {
                 if let Some(note) = msg.routing_note.as_ref() {
                     <div class="routing-note">{ note }</div>
                 }
-                { content_html }
-                { law_compare_html }
+                if is_user && *is_editing {
+                    { editor_html }
+                } else {
+                    { content_html }
+                    { law_compare_html }
+                }
                 <div class="message-actions">
                     { copy_btn }
+                    { edit_btn }
                     { regenerate_btn }
                     { retry_agent_btn }
                     { download_btn }
