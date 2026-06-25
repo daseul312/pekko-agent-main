@@ -441,6 +441,14 @@ pub struct AuthUser {
     pub profile_image_url: Option<String>,
 }
 
+/// `GET /api/sessions/:id/history` 응답의 단일 메시지(폴링으로 답변 이어받기용).
+/// 백엔드 `MessageRole`은 PascalCase로 직렬화되므로 role은 "User"/"Assistant"/"System" 문자열.
+#[derive(Clone, Debug, Deserialize)]
+pub struct HistoryMessage {
+    pub role: String,
+    pub content: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct LoginRequest {
     pub employee_id: String,
@@ -482,4 +490,10 @@ pub struct ChatSession {
     pub use_router: bool,
     #[serde(default)]
     pub routed_agent_ids: Vec<String>,
+    /// 답변 대기 중(질문은 보냈으나 답변 미도착). 창을 닫아도 유지되어 재진입 시 폴링 대상이 된다.
+    #[serde(default)]
+    pub pending: bool,
+    /// 사용자가 보지 않은 사이에 답변이 완료됨(재접속 시 '답변 완료' 배지 표시용).
+    #[serde(default)]
+    pub unread: bool,
 }

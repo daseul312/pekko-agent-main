@@ -91,6 +91,8 @@ pub fn sidebar(props: &SidebarProps) -> Html {
     });
 
     let has_sessions = !sorted_sessions.is_empty();
+    // 안 읽은 '답변 완료' 대화 수(빨간 카운트 배지용).
+    let unread_count = props.sessions.iter().filter(|s| s.unread).count();
 
     let health_class = match props.health_status.as_deref() {
         Some("healthy") => "healthy",
@@ -140,7 +142,12 @@ pub fn sidebar(props: &SidebarProps) -> Html {
             // ── History ──
             <div class="sidebar-section" style="flex: 1; overflow-y: auto;">
                 <div class="sidebar-section-title" style="display: flex; justify-content: space-between; align-items: center;">
-                    { "대화 기록" }
+                    <span style="display: inline-flex; align-items: center; gap: 6px;">
+                        { "대화 기록" }
+                        if unread_count > 0 {
+                            <span class="sidebar-unread-count">{ unread_count }</span>
+                        }
+                    </span>
                     <div class="history-actions">
                         <div class="search-trigger" onclick={
                             let cb = props.on_search_open.clone();
@@ -234,9 +241,16 @@ pub fn sidebar(props: &SidebarProps) -> Html {
                                             </div>
                                         }
                                         <div class="history-item-main">
-                                            <div class="history-title">{ &session.title }</div>
+                                            <div class="history-title">
+                                                if session.unread {
+                                                    <span class="history-unread-dot" title="답변 완료"></span>
+                                                }
+                                                { &session.title }
+                                            </div>
                                             <div class="history-meta">
-                                                <span>{ agent_name }</span>
+                                                <span class={classes!(session.pending.then_some("answering"))}>
+                                                    { if session.pending { "답변 중...".to_string() } else { agent_name } }
+                                                </span>
                                                 <span>{ time_str }</span>
                                             </div>
                                         </div>

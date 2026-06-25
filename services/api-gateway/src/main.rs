@@ -18,7 +18,8 @@ use tracing::{info, error, warn};
 use pekko_agent_core::{Message, TokenUsage, ShortTermMemory, ToolContext, AgentInfo, AgentStatus};
 use pekko_agent_llm::{LlmConfig, ClaudeClient, OpenAIClient, LlmRequest, ClaudeMessage, ContentBlock, ClaudeTool};
 use pekko_agent_tools::{ToolRegistry, builtin::{PermitSearchTool, ComplianceCheckTool, EhsQueryTool, LawCompareTool}};
-use pekko_agent_memory::{InMemoryConversationStore, InMemoryVectorStore, InMemoryEpisodicStore};
+use pekko_agent_memory::{CoreDbConversationStore, InMemoryVectorStore, InMemoryEpisodicStore};
+use coredb::{CoreDB, DatabaseConfig};
 use pekko_agent_orchestrator::OrchestratorActor;
 use pekko_agent_events::EventPublisher;
 use pekko_agent_security::{RbacManager, TenantManager, AuditLogger};
@@ -27,11 +28,12 @@ use sqlx::PgPool;
 mod auth;
 use auth::{AuthIdentity, OptionalAuth};
 
+
 /// Shared application state with all services
 #[derive(Clone)]
 struct AppState {
     tool_registry: Arc<RwLock<ToolRegistry>>,
-    conversation_store: Arc<InMemoryConversationStore>,
+    conversation_store: Arc<CoreDbConversationStore>,
     vector_store: Arc<InMemoryVectorStore>,
     episodic_store: Arc<InMemoryEpisodicStore>,
     orchestrator: Arc<RwLock<OrchestratorActor>>,
@@ -2229,6 +2231,26 @@ async fn main() -> anyhow::Result<()> {
     info!("Connected to PostgreSQL database");
     let pg_pool = Arc::new(pg_pool);
 
+    // 임베디드 coreDB: 사용자별 일일 토큰 사용량을 영구 저장한다(PostgreSQL 테이블 불필요).
+    let coredb_dir = std::path::PathBuf::from(
+        std::env::var("COREDB_DATA_DIR").unwrap_or_else(|_| "./data/coredb".to_string()),
+    );
+    let coredb = Arc::new(
+        CoreDB::new(DatabaseConfig {
+            data_directory: coredb_dir.join("data"),
+            commitlog_directory: coredb_dir.join("commitlog"),
+            ..Default::default()
+        })
+        .await
+        .expect("Failed to initialize CoreDB for token usage"),
+    );
+    // 대화 기록을 coreDB에 영구 저장한다(서버 재시작/창 닫힘 후에도 답변을 이어받기 위함).
+    let conversation_store = Arc::new(
+        CoreDbConversationStore::new(coredb.clone(), 100)
+            .await
+            .expect("Failed to initialize conversation store"),
+    );
+
     // RSA keypair for login password encryption. Use LOGIN_RSA_PRIVATE_KEY (PEM) when set
     // for cross-restart / multi-instance stability; otherwise generate an ephemeral key.
     let (rsa_private_key, rsa_public_key_pem) = {
@@ -2330,7 +2352,7 @@ async fn main() -> anyhow::Result<()> {
     // Create application state
     let state = AppState {
         tool_registry: Arc::new(RwLock::new(tool_registry)),
-        conversation_store: Arc::new(InMemoryConversationStore::new(100)),
+        conversation_store,
         vector_store: Arc::new(InMemoryVectorStore::new()),
         episodic_store: Arc::new(InMemoryEpisodicStore::new()),
         orchestrator,

@@ -514,6 +514,8 @@ fn apply_local_messages(
             is_pinned: false,
             use_router: use_router_value,
             routed_agent_ids,
+            pending: false,
+            unread: false,
         });
     }
 
@@ -556,6 +558,8 @@ fn submit_query(
     selected_agent_id: UseStateHandle<Option<String>>,
     use_router: UseStateHandle<bool>,
     active_routed_agent_ids: UseStateHandle<Vec<String>>,
+    // 현재 보고 있는 세션 id의 최신값(폴러/완료 콜백이 화면 갱신 여부를 판단하는 데 사용).
+    current_sid_ref: std::rc::Rc<std::cell::RefCell<Option<Uuid>>>,
     content: String,
     request_content: String,
     current_msgs: Vec<ChatMessage>,
@@ -564,9 +568,48 @@ fn submit_query(
     let route_via_router = *use_router || (*selected_agent_id).is_none();
     let is_regeneration = regenerate_target_id.is_some();
 
+    // 답변을 비동기 작업처럼 다루기 위해 session_id를 미리 확정한다(새 대화도 즉시 식별 가능
+    // → 창을 닫아도 재진입 시 이 id로 답변을 폴링해 이어받는다).
+    let sid = (*session_id).clone().unwrap_or_else(Uuid::new_v4);
+    session_id.set(Some(sid));
+
     messages.set(current_msgs.clone());
     is_loading.set(true);
     live_steps.set(Vec::new());
+
+    let active_agent_id = (*selected_agent_id).clone();
+
+    // 스트리밍 시작 전에 현재 대화를 pending 상태로 즉시 저장한다(localStorage 반영).
+    // 이렇게 해야 답변 도착 전에 새 대화로 전환하거나 창을 닫아도 질문이 보존된다.
+    // 동시 진행 중인 다른 질문의 갱신을 덮어쓰지 않도록 항상 localStorage의 최신 목록을 기준으로 한다.
+    {
+        let mut current_sessions =
+            LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY).unwrap_or_default();
+        if let Some(idx) = current_sessions.iter().position(|s| s.id == sid) {
+            current_sessions[idx].messages = current_msgs.clone();
+            if !is_regeneration {
+                current_sessions[idx].last_message = content.clone();
+            }
+            current_sessions[idx].timestamp = chrono::Utc::now();
+            current_sessions[idx].pending = true;
+            current_sessions[idx].unread = false;
+        } else {
+            current_sessions.push(ChatSession {
+                id: sid,
+                agent_id: active_agent_id.clone().unwrap_or_default(),
+                title: build_initial_session_title(&content),
+                last_message: content.clone(),
+                timestamp: chrono::Utc::now(),
+                messages: current_msgs.clone(),
+                is_pinned: false,
+                use_router: route_via_router,
+                routed_agent_ids: (*active_routed_agent_ids).clone(),
+                pending: true,
+                unread: false,
+            });
+        }
+        sessions.set(current_sessions);
+    }
 
     let messages_clone = messages.clone();
     let session_id_clone = session_id.clone();
@@ -577,8 +620,6 @@ fn submit_query(
     let selected_agent_id_clone = selected_agent_id.clone();
     let use_router_clone = use_router.clone();
     let active_routed_agent_ids_clone = active_routed_agent_ids.clone();
-    let sid = (*session_id).clone();
-    let active_agent_id = (*selected_agent_id).clone();
 
     spawn_local(async move {
         // `final_steps` captures the processing steps from the streaming router
@@ -610,7 +651,7 @@ fn submit_query(
             let res = api::send_query_stream(
                 agent_id_opt.as_deref(),
                 &request_content,
-                sid,
+                Some(sid),
                 on_event,
             )
             .await;
@@ -619,7 +660,7 @@ fn submit_query(
             // stream endpoint is unavailable), retry with the buffered endpoint
             // so answers still work (without the live steps).
             if res.is_err() && final_steps.is_empty() {
-                api::send_query(agent_id_opt.as_deref(), &request_content, sid).await
+                api::send_query(agent_id_opt.as_deref(), &request_content, Some(sid)).await
             } else {
                 res
             }
@@ -667,15 +708,22 @@ fn submit_query(
                     }
                 }
 
-                messages_clone.set(msgs.clone());
-
-                selected_agent_id_clone.set(Some(resp.agent_id.clone()));
-                use_router_clone.set(route_via_router);
-                active_routed_agent_ids_clone.set(routed_agent_ids.clone());
-
-                let mut current_sessions = (*sessions_clone).clone();
                 let new_sid = resp.session_id;
-                session_id_clone.set(Some(new_sid));
+                // 답변 도착 시점에 사용자가 아직 이 대화를 보고 있는지 판단한다.
+                // 새 대화로 전환했거나 창을 닫았다면(다른 세션이면) 화면은 건드리지 않고,
+                // 세션 저장만 갱신하며 '답변 완료' 미확인 표시를 남긴다.
+                let still_viewing = *current_sid_ref.borrow() == Some(sid);
+                if still_viewing {
+                    messages_clone.set(msgs.clone());
+                    selected_agent_id_clone.set(Some(resp.agent_id.clone()));
+                    use_router_clone.set(route_via_router);
+                    active_routed_agent_ids_clone.set(routed_agent_ids.clone());
+                    session_id_clone.set(Some(new_sid));
+                }
+
+                // 동시 진행 중인 다른 질문의 변경을 덮어쓰지 않도록 최신 목록을 localStorage에서 읽는다.
+                let mut current_sessions =
+                    LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY).unwrap_or_default();
 
                 if let Some(idx) = current_sessions.iter().position(|s| s.id == new_sid) {
                     current_sessions[idx].agent_id = resp.agent_id.clone();
@@ -686,6 +734,9 @@ fn submit_query(
                     current_sessions[idx].timestamp = chrono::Utc::now();
                     current_sessions[idx].use_router = route_via_router;
                     current_sessions[idx].routed_agent_ids = routed_agent_ids.clone();
+                    // 답변 도착: 대기 해제. 보고 있지 않았다면 미확인 표시를 남긴다.
+                    current_sessions[idx].pending = false;
+                    current_sessions[idx].unread = !still_viewing;
                 } else {
                     current_sessions.push(ChatSession {
                         id: new_sid,
@@ -697,12 +748,15 @@ fn submit_query(
                         is_pinned: false,
                         use_router: route_via_router,
                         routed_agent_ids: routed_agent_ids.clone(),
+                        pending: false,
+                        unread: !still_viewing,
                     });
 
                     let sessions_inner = sessions_clone.clone();
                     spawn_local(async move {
                         if let Ok(summary_title) = api::fetch_session_summary(new_sid).await {
-                            let mut s_list = (*sessions_inner).clone();
+                            let mut s_list =
+                                LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY).unwrap_or_default();
                             if let Some(id) = s_list.iter().position(|s| s.id == new_sid) {
                                 s_list[id].title = summary_title;
                                 sessions_inner.set(s_list);
@@ -713,30 +767,43 @@ fn submit_query(
                 sessions_clone.set(current_sessions);
             }
             Err(e) => {
-                use_router_clone.set(route_via_router);
-                let err_msg = ChatMessage {
-                    id: Uuid::new_v4().to_string(),
-                    role: MessageRole::System,
-                    content: format!("Error: {e}"),
-                    request_content: None,
-                    tools_used: vec![],
-                    token_usage: None,
-                    timestamp: chrono::Utc::now(),
-                    suggestions: None,
-                    old_new_comparison: None,
-                    response_versions: vec![],
-                    current_response_index: 0,
-                    ui: None,
-                    board_post_target: None,
-                    process_steps: Vec::new(),
-                };
-                let mut msgs = current_msgs.clone();
-                msgs.push(err_msg);
-                messages_clone.set(msgs);
+                let still_viewing = *current_sid_ref.borrow() == Some(sid);
+                if still_viewing {
+                    use_router_clone.set(route_via_router);
+                    let err_msg = ChatMessage {
+                        id: Uuid::new_v4().to_string(),
+                        role: MessageRole::System,
+                        content: format!("Error: {e}"),
+                        request_content: None,
+                        tools_used: vec![],
+                        token_usage: None,
+                        timestamp: chrono::Utc::now(),
+                        suggestions: None,
+                        old_new_comparison: None,
+                        response_versions: vec![],
+                        current_response_index: 0,
+                        ui: None,
+                        board_post_target: None,
+                        process_steps: Vec::new(),
+                    };
+                    let mut msgs = current_msgs.clone();
+                    msgs.push(err_msg);
+                    messages_clone.set(msgs);
+                }
+                // 실패 시에도 대기 상태를 풀어, 재진입 폴링이 무한 대기하지 않도록 한다.
+                let mut current_sessions =
+                    LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY).unwrap_or_default();
+                if let Some(idx) = current_sessions.iter().position(|s| s.id == sid) {
+                    current_sessions[idx].pending = false;
+                    sessions_clone.set(current_sessions);
+                }
             }
         }
-        is_loading_clone.set(false);
-        live_steps_clone.set(Vec::new());
+        // 화면 로딩 표시는 이 대화를 아직 보고 있을 때만 해제(다른 대화로 옮겨갔으면 그 대화 상태 유지).
+        if *current_sid_ref.borrow() == Some(sid) {
+            is_loading_clone.set(false);
+            live_steps_clone.set(Vec::new());
+        }
     });
 }
 
@@ -820,6 +887,14 @@ fn app() -> Html {
     let selected_agent_id = use_state(|| Option::<String>::None);
     let messages = use_state(Vec::<ChatMessage>::new);
     let session_id = use_state(|| Option::<Uuid>::None);
+    // 장시간 도는 폴러(use_state 핸들은 생성 시점 값으로 고정됨)가 "지금 보고 있는 세션"을
+    // 항상 최신으로 읽을 수 있도록, 현재 session_id를 ref로도 미러링한다.
+    let current_sid_ref = use_mut_ref(|| Option::<Uuid>::None);
+    // 답변 완료 토스트(우하단 플로팅). 닫았거나 8초가 지나 자동 소멸한 세션 id를 ref에 모으고,
+    // 변경 시 toast_tick으로 재렌더를 유도한다(ref만으로는 재렌더되지 않음).
+    let toast_dismissed_ref = use_mut_ref(|| std::collections::HashSet::<Uuid>::new());
+    let toast_timed_ref = use_mut_ref(|| std::collections::HashSet::<Uuid>::new());
+    let toast_tick = use_state(|| 0u32);
     let sessions =
         use_state(|| LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY).unwrap_or_default());
     let is_loading = use_state(|| false);
@@ -870,8 +945,8 @@ fn app() -> Html {
         });
     }
 
-    // 새로고침 후 세션 쿠키로 로그인 상태를 복원한다. auth_user는 메모리에만 있으므로,
-    // 마운트 시 /auth/me를 호출해 로그인 사용자를 되살린다. 비로그인이면 아무 것도 하지 않는다.
+    // 새로고침 후 세션 쿠키로 로그인 상태를 복원한다. auth_user는 메모리에만
+    // 있으므로, 마운트 시 /auth/me를 호출해 로그인 사용자를 되살린다. 비로그인이면 아무 것도 하지 않는다.
     {
         let auth_user = auth_user.clone();
         use_effect_with((), move |_| {
@@ -880,6 +955,96 @@ fn app() -> Html {
                     auth_user.set(Some(user));
                 }
             });
+            || ()
+        });
+    }
+
+    // 현재 보고 있는 세션 id를 ref에 미러링(폴러의 stale 핸들 문제 회피).
+    {
+        let current_sid_ref = current_sid_ref.clone();
+        use_effect_with((*session_id).clone(), move |sid| {
+            *current_sid_ref.borrow_mut() = *sid;
+            || ()
+        });
+    }
+
+    // 마운트 시: 이전 세션에서 답변 대기(pending)로 남은 대화를 폴링해 답변을 이어받는다.
+    // (창을 닫았다 다시 연 경우의 복구 경로. 현재 탭에서 진행 중인 전송은 스트림 태스크가 처리.)
+    {
+        let sessions = sessions.clone();
+        let messages = messages.clone();
+        let is_loading = is_loading.clone();
+        let current_sid_ref = current_sid_ref.clone();
+        use_effect_with((), move |_| {
+            let pending_ids: Vec<Uuid> = (*sessions)
+                .iter()
+                .filter(|s| s.pending)
+                .map(|s| s.id)
+                .collect();
+            for pid in pending_ids {
+                let sessions = sessions.clone();
+                let messages = messages.clone();
+                let is_loading = is_loading.clone();
+                let current_sid_ref = current_sid_ref.clone();
+                spawn_local(async move {
+                    // 약 3초 간격, 최대 ~5분 폴링.
+                    for _ in 0..100u32 {
+                        gloo_timers::future::TimeoutFuture::new(3_000).await;
+                        let history = match api::fetch_session_history(pid).await {
+                            Ok(h) => h,
+                            Err(_) => continue,
+                        };
+                        let answered = history
+                            .last()
+                            .map(|m| m.role == "Assistant")
+                            .unwrap_or(false);
+                        if !answered {
+                            continue;
+                        }
+                        let answer = history
+                            .last()
+                            .map(|m| m.content.clone())
+                            .unwrap_or_default();
+
+                        // 동시 수정에 안전하도록 최신 세션 목록을 localStorage에서 읽어 갱신한다.
+                        let mut list = LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY)
+                            .unwrap_or_default();
+                        if let Some(idx) = list.iter().position(|s| s.id == pid) {
+                            let already = list[idx]
+                                .messages
+                                .last()
+                                .map(|m| m.role == MessageRole::Assistant)
+                                .unwrap_or(false);
+                            if !already {
+                                let version =
+                                    build_response_version(answer.clone(), vec![], None, None, None);
+                                let assistant_msg = build_assistant_message(version);
+                                list[idx].messages.push(assistant_msg);
+                            }
+                            let viewing = *current_sid_ref.borrow() == Some(pid);
+                            list[idx].pending = false;
+                            list[idx].unread = !viewing;
+                            list[idx].timestamp = chrono::Utc::now();
+                            let synced_messages = list[idx].messages.clone();
+                            sessions.set(list);
+                            if viewing {
+                                messages.set(synced_messages);
+                                is_loading.set(false);
+                            }
+                        }
+                        return;
+                    }
+                    // 타임아웃: 무한 폴링 방지를 위해 대기 상태를 해제한다.
+                    let mut list =
+                        LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY).unwrap_or_default();
+                    if let Some(idx) = list.iter().position(|s| s.id == pid) {
+                        if list[idx].pending {
+                            list[idx].pending = false;
+                            sessions.set(list);
+                        }
+                    }
+                });
+            }
             || ()
         });
     }
@@ -1010,12 +1175,18 @@ fn app() -> Html {
         let session_id = session_id.clone();
         let use_router = use_router.clone();
         let active_routed_agent_ids = active_routed_agent_ids.clone();
+        let is_loading = is_loading.clone();
+        let live_steps = live_steps.clone();
         Callback::from(move |_: ()| {
             selected_agent_id.set(None);
             messages.set(vec![]);
             session_id.set(None);
             use_router.set(false);
             active_routed_agent_ids.set(vec![]);
+            // 진행 중이던 답변은 백그라운드에서 계속되며(세션은 pending으로 보존),
+            // 새 빈 화면이 '답변 중'으로 보이지 않도록 화면 로딩 상태만 초기화한다.
+            is_loading.set(false);
+            live_steps.set(vec![]);
         })
     };
 
@@ -1026,6 +1197,8 @@ fn app() -> Html {
         let sessions = sessions.clone();
         let use_router = use_router.clone();
         let active_routed_agent_ids = active_routed_agent_ids.clone();
+        let toast_dismissed_ref = toast_dismissed_ref.clone();
+        let toast_timed_ref = toast_timed_ref.clone();
         Callback::from(move |sid: Uuid| {
             if let Some(session) = sessions.iter().find(|s| s.id == sid) {
                 selected_agent_id.set(Some(session.agent_id.clone()));
@@ -1036,7 +1209,28 @@ fn app() -> Html {
                     &session.routed_agent_ids,
                     Some(&session.agent_id),
                 ));
+                // 대화를 열었으면 '답변 완료' 미확인 표시를 해제한다.
+                if session.unread {
+                    let mut updated = (*sessions).clone();
+                    if let Some(idx) = updated.iter().position(|s| s.id == sid) {
+                        updated[idx].unread = false;
+                        sessions.set(updated);
+                    }
+                }
+                // 토스트 추적에서도 제거 → 같은 대화에 이후 새 답변이 오면 다시 알릴 수 있게.
+                toast_dismissed_ref.borrow_mut().remove(&sid);
+                toast_timed_ref.borrow_mut().remove(&sid);
             }
+        })
+    };
+
+    // 토스트 닫기/자동소멸: 해당 세션 id를 dismissed에 넣고 재렌더를 유발한다.
+    let dismiss_toast = {
+        let toast_dismissed_ref = toast_dismissed_ref.clone();
+        let toast_tick = toast_tick.clone();
+        Callback::from(move |sid: Uuid| {
+            toast_dismissed_ref.borrow_mut().insert(sid);
+            toast_tick.set((*toast_tick).wrapping_add(1));
         })
     };
 
@@ -1218,6 +1412,7 @@ fn app() -> Html {
         let use_router = use_router.clone();
         let active_routed_agent_ids = active_routed_agent_ids.clone();
         let auth_user = auth_user.clone();
+        let current_sid_ref = current_sid_ref.clone();
         Callback::from(move |content: String| {
             let request_content = build_request_content((*messages).as_slice(), &content);
             let mut new_msgs = (*messages).clone();
@@ -1337,6 +1532,7 @@ fn app() -> Html {
                 selected_agent_id.clone(),
                 use_router.clone(),
                 active_routed_agent_ids.clone(),
+                current_sid_ref.clone(),
                 content,
                 request_content,
                 new_msgs,
@@ -1354,6 +1550,7 @@ fn app() -> Html {
         let selected_agent_id = selected_agent_id.clone();
         let use_router = use_router.clone();
         let active_routed_agent_ids = active_routed_agent_ids.clone();
+        let current_sid_ref = current_sid_ref.clone();
         Callback::from(move |assistant_message_id: String| {
             if *is_loading {
                 return;
@@ -1374,6 +1571,7 @@ fn app() -> Html {
                 selected_agent_id.clone(),
                 use_router.clone(),
                 active_routed_agent_ids.clone(),
+                current_sid_ref.clone(),
                 content,
                 request_content,
                 (*messages).clone(),
@@ -1477,6 +1675,51 @@ fn app() -> Html {
     let app_class = if *is_dark_mode { "dark" } else { "" };
     let mobile_sidebar_class = (*is_mobile_sidebar_open).then_some("mobile-sidebar-open");
 
+    // 현재 보고 있는 대화가 답변 대기(pending)이거나 전송 중이면 "답변 중" 상태로 본다.
+    // (재진입으로 복원된 pending 세션은 is_loading이 아니어도 대기 표시가 필요.)
+    let current_pending = (*session_id)
+        .and_then(|sid| (*sessions).iter().find(|s| s.id == sid).map(|s| s.pending))
+        .unwrap_or(false);
+    let answering = *is_loading || current_pending;
+
+    // 답변 완료 토스트 대상: 미확인이면서 아직 닫지 않은 세션. 도착 순(timestamp 오름차순),
+    // 최대 5개까지만 띄우고 초과분은 사이드바 배지로만 알린다.
+    let toast_sessions: Vec<ChatSession> = {
+        let dismissed = toast_dismissed_ref.borrow();
+        let mut v: Vec<ChatSession> = (*sessions)
+            .iter()
+            .filter(|s| s.unread && !dismissed.contains(&s.id))
+            .cloned()
+            .collect();
+        v.sort_by_key(|s| s.timestamp);
+        v.truncate(5);
+        v
+    };
+
+    // 각 토스트는 표시 8초 후 자동 소멸. 이미 타이머가 걸린 id는 건너뛴다.
+    {
+        let active_ids: Vec<Uuid> = toast_sessions.iter().map(|s| s.id).collect();
+        let toast_timed_ref = toast_timed_ref.clone();
+        let toast_dismissed_ref = toast_dismissed_ref.clone();
+        let toast_tick = toast_tick.clone();
+        use_effect_with(active_ids, move |ids| {
+            for &id in ids.iter() {
+                if toast_timed_ref.borrow().contains(&id) {
+                    continue;
+                }
+                toast_timed_ref.borrow_mut().insert(id);
+                let toast_dismissed_ref = toast_dismissed_ref.clone();
+                let toast_tick = toast_tick.clone();
+                gloo_timers::callback::Timeout::new(8_000, move || {
+                    toast_dismissed_ref.borrow_mut().insert(id);
+                    toast_tick.set((*toast_tick).wrapping_add(1));
+                })
+                .forget();
+            }
+            || ()
+        });
+    }
+
     html! {
         <div class={classes!("app-container", app_class, mobile_sidebar_class)}>
                 <Sidebar
@@ -1522,11 +1765,12 @@ fn app() -> Html {
                         auth_user={(*auth_user).clone()}
                         on_login_click={on_login_click.clone()}
                         on_logout={on_logout.clone()}
+                        is_answering={answering}
                         on_back_to_agents={header_back_to_agents.clone()}
                     />
                     <ChatArea
                         messages={(*messages).clone()}
-                        is_loading={*is_loading}
+                        is_loading={answering}
                         live_steps={(*live_steps).clone()}
                         on_send={on_send.clone()}
                         on_regenerate={on_regenerate.clone()}
@@ -1549,10 +1793,11 @@ fn app() -> Html {
                         auth_user={(*auth_user).clone()}
                         on_login_click={on_login_click.clone()}
                         on_logout={on_logout.clone()}
+                        is_answering={answering}
                     />
                     <ChatArea
                         messages={(*messages).clone()}
-                        is_loading={*is_loading}
+                        is_loading={answering}
                         live_steps={(*live_steps).clone()}
                         on_send={on_send.clone()}
                         on_regenerate={on_regenerate.clone()}
@@ -1575,6 +1820,7 @@ fn app() -> Html {
                         auth_user={(*auth_user).clone()}
                         on_login_click={on_login_click.clone()}
                         on_logout={on_logout.clone()}
+                        is_answering={answering}
                     />
                     <div class="home-main">
                         <AgentSelector
@@ -1825,6 +2071,46 @@ fn app() -> Html {
                     </div>
                 }
             } else { html! {} } }
+
+            // ── 답변 완료 토스트(우하단 플로팅, 도착 순으로 위→아래 누적) ──
+            { if toast_sessions.is_empty() { html! {} } else {
+                html! {
+                    <div class="toast-stack">
+                        { for toast_sessions.iter().map(|s| {
+                            let sid = s.id;
+                            let title = s.title.clone();
+                            let on_goto = {
+                                let on_select_session = on_select_session.clone();
+                                let dismiss_toast = dismiss_toast.clone();
+                                Callback::from(move |_: MouseEvent| {
+                                    on_select_session.emit(sid);
+                                    dismiss_toast.emit(sid);
+                                })
+                            };
+                            let on_close = {
+                                let dismiss_toast = dismiss_toast.clone();
+                                Callback::from(move |e: MouseEvent| {
+                                    e.stop_propagation();
+                                    dismiss_toast.emit(sid);
+                                })
+                            };
+                            html! {
+                                <div class="toast" key={sid.to_string()}>
+                                    <div class="toast-body">
+                                        <span class="toast-icon">{ "✓" }</span>
+                                        <div class="toast-text">
+                                            <div class="toast-title">{ "답변이 완료되었습니다" }</div>
+                                            <div class="toast-sub">{ title }</div>
+                                        </div>
+                                        <button class="toast-close" onclick={on_close} aria-label="닫기">{ "×" }</button>
+                                    </div>
+                                    <button class="toast-goto" onclick={on_goto}>{ "바로가기" }</button>
+                                </div>
+                            }
+                        }) }
+                    </div>
+                }
+            } }
         </div>
     }
 }

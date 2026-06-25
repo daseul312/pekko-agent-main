@@ -9,6 +9,9 @@ pub struct HeaderProps {
     pub on_login_click: Callback<()>,
     pub on_logout: Callback<()>,
     pub is_dark_mode: bool,
+    /// 현재 대화가 답변 대기/생성 중이면 에이전트 라벨 대신 "답변 중..."을 표시한다.
+    #[prop_or_default]
+    pub is_answering: bool,
     pub on_theme_toggle: Callback<()>,
     #[prop_or_default]
     pub on_back_to_agents: Option<Callback<()>>,
@@ -55,7 +58,15 @@ pub fn chat_header(props: &HeaderProps) -> Html {
         }
     };
 
-    let main_content = match props.agents.as_slice() {
+    let main_content = if props.is_answering {
+        html! {
+            <div class="chat-header-main">
+                <div class="chat-header-row">
+                    <span class="chat-header-title chat-header-answering">{ "답변 중..." }</span>
+                </div>
+            </div>
+        }
+    } else { match props.agents.as_slice() {
         [] => html! {
             <div class="chat-header-main">
                 <div class="chat-header-row">
@@ -100,7 +111,7 @@ pub fn chat_header(props: &HeaderProps) -> Html {
                 </div>
             }
         }
-    };
+    } };
 
     let theme_toggle = html! {
         <button class="theme-toggle-btn" onclick={let on_toggle = props.on_theme_toggle.clone(); move |_| on_toggle.emit(())} title={if props.is_dark_mode { "라이트 모드로 변경" } else { "다크 모드로 변경" }}>

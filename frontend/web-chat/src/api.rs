@@ -108,6 +108,24 @@ pub async fn fetch_session_summary(session_id: Uuid) -> Result<String, String> {
     }
 }
 
+/// GET /api/sessions/:session_id/history — 세션의 대화 메시지를 받아온다.
+/// 창을 닫았다 다시 열었을 때, 백그라운드로 완료된 답변을 이어받기 위해 폴링에 쓴다.
+pub async fn fetch_session_history(session_id: Uuid) -> Result<Vec<HistoryMessage>, String> {
+    let url = api_url(&format!("/api/sessions/{}/history", session_id));
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+
+    if resp.ok() {
+        resp.json::<Vec<HistoryMessage>>()
+            .await
+            .map_err(|e| format!("Parse error: {e}"))
+    } else {
+        Err(format!("HTTP {}", resp.status()))
+    }
+}
+
 /// GET /auth/public-key — 비밀번호 암호화에 쓸 RSA 공개키(SPKI PEM)를 받아온다.
 async fn fetch_public_key_pem() -> Result<String, String> {
     let url = api_url("/auth/public-key");

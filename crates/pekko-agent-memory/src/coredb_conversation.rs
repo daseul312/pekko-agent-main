@@ -16,6 +16,30 @@ pub struct CoreDbConversationStore {
     keyspace: String,
 }
 
+/// coreDB의 `CREATE ... IF NOT EXISTS`는 멱등이 아니라 이미 있으면 에러를 반환한다.
+/// 영구 저장이라 서버 재시작 시 keyspace/table이 이미 존재하므로, "already exists" 류
+/// 에러는 정상으로 보고 무시하고 그 외 에러만 전파한다.
+fn ignore_already_exists<T, E: std::fmt::Display>(
+    result: Result<T, E>,
+    what: &str,
+) -> Result<(), MemoryError> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.to_lowercase().contains("already exists") {
+                debug!(what, "schema object already exists; skipping");
+                Ok(())
+            } else {
+                Err(MemoryError::StorageError(format!(
+                    "Failed to create {}: {}",
+                    what, msg
+                )))
+            }
+        }
+    }
+}
+
 impl CoreDbConversationStore {
     /// Create a new CoreDB-backed conversation store
     ///
@@ -62,9 +86,7 @@ impl CoreDbConversationStore {
             "CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class': 'SimpleStrategy', 'replication_factor': 1}}",
             keyspace
         );
-        db.execute_cql(&cql).await.map_err(|e| {
-            MemoryError::StorageError(format!("Failed to create keyspace: {}", e))
-        })?;
+        ignore_already_exists(db.execute_cql(&cql).await, "keyspace")?;
 
         // Create conversations table
         // partition key: session_id, clustering key: seq_num (for ordering)
@@ -79,9 +101,7 @@ impl CoreDbConversationStore {
             )",
             keyspace
         );
-        db.execute_cql(&cql).await.map_err(|e| {
-            MemoryError::StorageError(format!("Failed to create conversations table: {}", e))
-        })?;
+        ignore_already_exists(db.execute_cql(&cql).await, "conversations table")?;
 
         debug!("CoreDB schema initialized for conversations");
         Ok(())

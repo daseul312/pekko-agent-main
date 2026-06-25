@@ -13,6 +13,7 @@ pekko-agent-memory = { path = "../../crates/pekko-agent-memory" }
 pekko-agent-orchestrator = { path = "../../crates/pekko-agent-orchestrator" }
 pekko-agent-events = { path = "../../crates/pekko-agent-events" }
 pekko-agent-security = { path = "../../crates/pekko-agent-security" }
+coredb.workspace = true
 tokio.workspace = true
 tokio-stream = "0.1"
 serde.workspace = true
