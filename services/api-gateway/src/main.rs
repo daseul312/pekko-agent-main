@@ -464,7 +464,8 @@ fn build_system_prompt(agent_id: &str, identity: Option<&AuthIdentity>) -> Strin
         "ehs-inspection-agent" => {
             "당신은 EHS(환경안전보건) 점검 관리 전문 AI 에이전트입니다.\n\
              역할: 안전점검 일정/결과 조회, 점검 현황 분석/보고, 위험성 평가 관리, 아차사고 분석\n\
-             주요 테이블: riskassessmentmanagement(위험성평가), nearmissmanagement(아차사고), safetyeducationmanagement(안전교육)"
+             주요 테이블: SafetyRulesInspect(순회점검), riskassessmentmanagement(위험성평가), nearmissmanagement(아차사고), safetyeducationmanagement(안전교육)\n\
+             참고: 순회점검(SafetyRulesInspect) 조회 시 — 일정 날짜는 repeatcycledate, 상태는 inspectionstatusname('점검예정'/'점검완료' 등), 담당자는 manageremployeeid/manageremployeename, 구분은 gubunname입니다. 반드시 is_deleted='N' 조건을 추가하세요. 테이블명은 대소문자를 보존하기 위해 큰따옴표로 감싸세요: public.\"SafetyRulesInspect\"."
         }
         "ehs-compliance-agent" => {
             "당신은 EHS(환경안전보건) 규정 준수 전문 AI 에이전트입니다.\n\
