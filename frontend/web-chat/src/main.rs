@@ -1675,12 +1675,13 @@ fn app() -> Html {
     let app_class = if *is_dark_mode { "dark" } else { "" };
     let mobile_sidebar_class = (*is_mobile_sidebar_open).then_some("mobile-sidebar-open");
 
-    // 현재 보고 있는 대화가 답변 대기(pending)이거나 전송 중이면 "답변 중" 상태로 본다.
-    // (재진입으로 복원된 pending 세션은 is_loading이 아니어도 대기 표시가 필요.)
-    let current_pending = (*session_id)
+    // "답변 중" 표시는 오직 현재 보고 있는 대화의 pending 여부로만 판단한다.
+    // (전역 is_loading을 쓰면 백그라운드에서 다른 대화가 처리 중일 때 이미 답변이 끝난
+    //  대화창에도 타이핑 표시가 새어 나온다. 전송 시작 시 해당 세션을 pending=true로
+    //  동기 설정하므로, 활성 대화도 current_pending로 정확히 잡힌다.)
+    let answering = (*session_id)
         .and_then(|sid| (*sessions).iter().find(|s| s.id == sid).map(|s| s.pending))
         .unwrap_or(false);
-    let answering = *is_loading || current_pending;
 
     // 답변 완료 토스트 대상: 미확인이면서 아직 닫지 않은 세션. 도착 순(timestamp 오름차순),
     // 최대 5개까지만 띄우고 초과분은 사이드바 배지로만 알린다.
