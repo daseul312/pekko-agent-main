@@ -16,6 +16,14 @@ pub enum ClientError {
     Timeout,
 }
 
+/// rate limit 응답 헤더에서 정수 값을 읽는다. 헤더가 없거나 정수가 아니면 None.
+fn ratelimit_header(resp: &reqwest::Response, name: &str) -> Option<u64> {
+    resp.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+}
+
 /// Claude API Client
 pub struct ClaudeClient {
     client: Client,
@@ -75,12 +83,44 @@ impl ClaudeClient {
                     });
                 }
                 Ok(response) if response.status().as_u16() == 429 => {
+                    // Anthropic은 정확히 몇 초 뒤에 재시도하면 되는지 `retry-after`
+                    // 헤더(초)로 알려준다. 있으면 그만큼만 기다리고, 없으면 기존
+                    // 지수 백오프로 폴백한다.
+                    let retry_after = response
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.trim().parse::<u64>().ok());
+
+                    // 관측용: 조직의 분당 토큰 rate limit 잔여/한도(있으면 로깅).
+                    let tokens_remaining =
+                        ratelimit_header(&response, "anthropic-ratelimit-tokens-remaining");
+                    let tokens_limit =
+                        ratelimit_header(&response, "anthropic-ratelimit-tokens-limit");
+
                     retries += 1;
                     if retries > self.config.max_retries {
-                        return Err(ClientError::NetworkError("Rate limit exceeded".into()));
+                        let hint = match retry_after {
+                            Some(s) => format!("retry after ~{}s", s),
+                            None => "retry later".to_string(),
+                        };
+                        return Err(ClientError::NetworkError(format!(
+                            "rate limited (429); {}",
+                            hint
+                        )));
                     }
-                    warn!(retry = retries, "Rate limited, retrying...");
-                    tokio::time::sleep(Duration::from_secs(2u64.pow(retries))).await;
+
+                    // 서버가 알려준 대기 시간 우선, 없으면 2^retries 초.
+                    let wait = retry_after.unwrap_or_else(|| 2u64.pow(retries));
+                    warn!(
+                        retry = retries,
+                        wait_secs = wait,
+                        retry_after = ?retry_after,
+                        tokens_remaining = ?tokens_remaining,
+                        tokens_limit = ?tokens_limit,
+                        "Rate limited, waiting server-advised delay before retry"
+                    );
+                    tokio::time::sleep(Duration::from_secs(wait)).await;
                 }
                 Ok(response) => {
                     let status = response.status();

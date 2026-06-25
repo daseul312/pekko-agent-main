@@ -195,6 +195,34 @@ pub async fn logout() {
     let _ = with_credentials(Request::post(&url)).send().await;
 }
 
+/// GET /auth/me — 세션 쿠키로 현재 로그인 사용자를 복원한다. 새로고침 후 호출해
+/// 로그인 상태를 되살린다. 비로그인(401)이면 `Ok(None)`.
+pub async fn fetch_me() -> Result<Option<AuthUser>, String> {
+    let url = api_url("/auth/me");
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+
+    if resp.ok() {
+        let login = resp
+            .json::<LoginResponse>()
+            .await
+            .map_err(|e| format!("Parse error: {e}"))?;
+        Ok(Some(AuthUser {
+            id: login.employee_id,
+            name: login.employee_name,
+            company_code: login.company_code,
+            role: login.role,
+            profile_image_url: login.profile_image_url,
+        }))
+    } else if resp.status() == 401 {
+        Ok(None)
+    } else {
+        Err(format!("HTTP {}", resp.status()))
+    }
+}
+
 /// POST /api/query or /api/agents/:agent_id/query (buffered, non-streaming).
 /// Retained as a fallback; the live UI uses `send_query_stream`.
 #[allow(dead_code)]

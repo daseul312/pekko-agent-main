@@ -48,6 +48,8 @@ pub struct AuthIdentity {
     pub company_code: String,
     pub role: String,
     pub name: String,
+    /// 세션 만료 시각(Unix epoch 초). `/auth/me`가 그대로 돌려준다.
+    pub exp: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,6 +239,45 @@ pub async fn login_handler(
     ))
 }
 
+/// GET /auth/me — 세션 쿠키로 현재 로그인 사용자를 복원한다.
+///
+/// 세션 쿠키는 HttpOnly라 프론트(WASM)가 직접 읽지 못하므로, 새로고침 후 프론트가
+/// 이 엔드포인트를 호출해 로그인 상태를 되살린다. 쿠키가 없거나 무효하면 401.
+/// JWT에는 프로필 이미지가 없으므로 EmployeeInfo를 다시 조회해 동일한 정보를 채운다.
+pub async fn me_handler(
+    State(state): State<crate::AppState>,
+    OptionalAuth(auth): OptionalAuth,
+) -> Result<Json<LoginResponse>, (StatusCode, Json<LoginError>)> {
+    let id = auth.ok_or_else(unauthorized)?;
+
+    // 프로필 이미지 복원에는 eino가 필요하므로 먼저 EmployeeInfo에서 조회한다.
+    // 베스트-에포트: 조회 실패 시 프로필 이미지는 None으로 둔다.
+    let profile_image_url = match sqlx::query_scalar::<_, i32>(
+        r#"SELECT eino FROM public."EmployeeInfo" WHERE "employeeId" = $1 AND "companyCode" = $2"#,
+    )
+    .bind(&id.employee_id)
+    .bind(&id.company_code)
+    .fetch_optional(state.pg_pool.as_ref())
+    .await
+    {
+        Ok(Some(eino)) => fetch_profile_image_url(state.pg_pool.as_ref(), eino).await,
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, "auth/me: EmployeeInfo 조회 실패(무시)");
+            None
+        }
+    };
+
+    Ok(Json(LoginResponse {
+        employee_id: id.employee_id,
+        employee_name: id.name,
+        company_code: id.company_code,
+        role: id.role,
+        expires_at: id.exp,
+        profile_image_url,
+    }))
+}
+
 /// POST /auth/logout — 세션 쿠키 제거.
 pub async fn logout_handler(jar: CookieJar) -> (CookieJar, StatusCode) {
     let mut removal = Cookie::from(COOKIE_NAME);
@@ -258,6 +299,7 @@ fn verify_token(token: &str) -> Option<AuthIdentity> {
         company_code: c.company_code,
         role: c.role,
         name: c.name,
+        exp: c.exp,
     })
 }
 

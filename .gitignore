@@ -34,3 +34,6 @@ redis-data/
 pg-data/
 qdrant-data/
 redpanda-data/
+
+# Embedded coreDB runtime data (token usage store, etc.)
+/data/

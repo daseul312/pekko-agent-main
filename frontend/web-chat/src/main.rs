@@ -870,6 +870,20 @@ fn app() -> Html {
         });
     }
 
+    // 새로고침 후 세션 쿠키로 로그인 상태를 복원한다. auth_user는 메모리에만 있으므로,
+    // 마운트 시 /auth/me를 호출해 로그인 사용자를 되살린다. 비로그인이면 아무 것도 하지 않는다.
+    {
+        let auth_user = auth_user.clone();
+        use_effect_with((), move |_| {
+            spawn_local(async move {
+                if let Ok(Some(user)) = api::fetch_me().await {
+                    auth_user.set(Some(user));
+                }
+            });
+            || ()
+        });
+    }
+
     // Callbacks
     let on_login_click = {
         let is_login_modal_open = is_login_modal_open.clone();

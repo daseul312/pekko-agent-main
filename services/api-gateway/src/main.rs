@@ -2356,6 +2356,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/health", get(health_check))
         .route("/auth/public-key", get(auth::public_key_handler))
+        .route("/auth/me", get(auth::me_handler))
         .route("/auth/login", post(auth::login_handler))
         .route("/auth/logout", post(auth::logout_handler))
         .route("/api/agents", get(list_agents))
