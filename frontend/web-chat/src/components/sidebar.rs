@@ -3,7 +3,9 @@ use serde_json;
 use wasm_bindgen::prelude::*;
 use yew::prelude::*;
 
-use crate::types::{AgentMeta, ChatSession, BOARD_POST_ANALYZING_AGENT_ID, OTHER_AGENT_ID};
+use crate::types::{
+    AgentMeta, ChatSession, FavoriteQuestion, BOARD_POST_ANALYZING_AGENT_ID, OTHER_AGENT_ID,
+};
 
 #[wasm_bindgen]
 extern "C" {
@@ -49,6 +51,21 @@ fn session_agent_label(agents: &[AgentMeta], session: &ChatSession) -> String {
     }
 }
 
+/// 단일 agent_id에 대한 표시 라벨(즐겨찾기 항목용).
+fn agent_label_by_id(agents: &[AgentMeta], agent_id: &str) -> String {
+    if agent_id == BOARD_POST_ANALYZING_AGENT_ID {
+        "분석 중".to_string()
+    } else if agent_id == OTHER_AGENT_ID {
+        "기타".to_string()
+    } else {
+        agents
+            .iter()
+            .find(|a| a.id == agent_id)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| agent_id.to_string())
+    }
+}
+
 #[derive(Properties, PartialEq)]
 pub struct SidebarProps {
     pub sessions: Vec<ChatSession>,
@@ -62,6 +79,9 @@ pub struct SidebarProps {
     pub on_pin_session: Callback<uuid::Uuid>,
     pub on_rename_click: Callback<uuid::Uuid>,
     pub health_status: Option<String>,
+    pub favorites: Vec<FavoriteQuestion>,
+    pub on_favorite_ask: Callback<FavoriteQuestion>,
+    pub on_favorite_delete: Callback<uuid::Uuid>,
 }
 
 #[function_component(Sidebar)]
@@ -137,6 +157,52 @@ pub fn sidebar(props: &SidebarProps) -> Html {
                 }>
                     { "+ 새 대화" }
                 </div>
+            </div>
+
+            // ── Favorites (즐겨찾기) ──
+            <div class="sidebar-section sidebar-favorites">
+                <div class="sidebar-section-title">
+                    <span style="display: inline-flex; align-items: center; gap: 6px;">
+                        { "⭐ 즐겨찾기" }
+                    </span>
+                </div>
+                { if props.favorites.is_empty() {
+                    html! { <div class="favorites-empty">{ "즐겨찾기가 없습니다" }</div> }
+                } else {
+                    html! {
+                        <div class="favorites-list">
+                            { for props.favorites.iter().map(|fav| {
+                                let fav_clone = fav.clone();
+                                let fav_id = fav.id;
+                                let agent_label = agent_label_by_id(&props.agents, &fav.agent_id);
+
+                                let on_ask = {
+                                    let cb = props.on_favorite_ask.clone();
+                                    Callback::from(move |_: MouseEvent| cb.emit(fav_clone.clone()))
+                                };
+                                let on_delete = {
+                                    let cb = props.on_favorite_delete.clone();
+                                    Callback::from(move |e: MouseEvent| {
+                                        e.stop_propagation();
+                                        cb.emit(fav_id);
+                                    })
+                                };
+
+                                html! {
+                                    <div class="favorite-item" onclick={on_ask} title={fav.question.clone()}>
+                                        <div class="favorite-item-main">
+                                            <div class="favorite-question">{ &fav.question }</div>
+                                            <div class="favorite-agent">{ agent_label }</div>
+                                        </div>
+                                        <div class="favorite-delete" onclick={on_delete} title="즐겨찾기 삭제">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                                        </div>
+                                    </div>
+                                }
+                            })}
+                        </div>
+                    }
+                }}
             </div>
 
             // ── History ──

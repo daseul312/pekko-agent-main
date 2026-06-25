@@ -501,3 +501,14 @@ pub struct ChatSession {
     #[serde(default)]
     pub unread: bool,
 }
+
+/// 즐겨찾기 질문 템플릿. 사용자가 자주 쓰는 질문을 ⭐로 저장해 원클릭으로 재질문한다.
+/// localStorage(`pekko_favorite_questions`)에 보관하며, 저장 당시 에이전트(`agent_id`)에
+/// 고정 라우팅된다. 중복 판정은 `(agent_id, question)` 쌍 기준.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FavoriteQuestion {
+    pub id: Uuid,
+    pub agent_id: String,
+    pub question: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}

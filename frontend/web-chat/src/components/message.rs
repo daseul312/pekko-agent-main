@@ -34,6 +34,14 @@ pub struct MessageProps {
     pub on_select_response_page: Callback<(String, usize)>,
     pub on_board_post_target_selected: Callback<BoardPostTarget>,
     pub on_board_post_complete: Callback<BoardPostCompletion>,
+    /// 사용자 질문 ⭐ 토글: 질문 내용을 전달(에이전트 id는 상위에서 결합).
+    pub on_favorite_toggle: Callback<String>,
+    /// 이 질문이 현재 에이전트 즐겨찾기에 담겨 있는지(별 채움 판정).
+    #[prop_or_default]
+    pub is_favorited: bool,
+    /// 즐겨찾기 버튼 노출 여부. 예시질문/종류 선택 칩으로 보낸 메시지는 false.
+    #[prop_or_default]
+    pub can_favorite: bool,
     pub regenerate_disabled: bool,
     #[prop_or_default]
     pub token: Option<String>,
@@ -328,6 +336,26 @@ pub fn message_bubble(props: &MessageProps) -> Html {
         html! {}
     };
 
+    // 내 질문 ⭐ 즐겨찾기 토글(사용자 메시지에만). 누르면 현재 에이전트 즐겨찾기에 추가/해제.
+    let favorite_btn = if is_user && msg.ui.is_none() && !*is_editing && props.can_favorite {
+        let on_favorite_toggle = props.on_favorite_toggle.clone();
+        let content = msg.content.clone();
+        let on_click = Callback::from(move |_: MouseEvent| {
+            on_favorite_toggle.emit(content.clone());
+        });
+        html! {
+            <button
+                class={classes!("message-fav-btn", props.is_favorited.then_some("active"))}
+                onclick={on_click}
+                title={ if props.is_favorited { "즐겨찾기 해제" } else { "즐겨찾기에 추가" } }
+            >
+                { if props.is_favorited { "⭐ 저장됨" } else { "☆ 즐겨찾기" } }
+            </button>
+        }
+    } else {
+        html! {}
+    };
+
     // 인라인 에디터: 수정된 질문을 전송하면 이후 대화를 지우고 새 답변을 생성한다.
     let editor_html = {
         let on_input = {
@@ -469,6 +497,7 @@ pub fn message_bubble(props: &MessageProps) -> Html {
                 <div class="message-actions">
                     { copy_btn }
                     { edit_btn }
+                    { favorite_btn }
                     { regenerate_btn }
                     { retry_agent_btn }
                     { download_btn }

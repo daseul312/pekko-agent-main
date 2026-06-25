@@ -5,8 +5,8 @@ use crate::components::input::ChatInput;
 use crate::components::message::{MessageBubble, ProcessSteps, TypingIndicator};
 use crate::components::suggestions::Suggestions;
 use crate::types::{
-    AgentMeta, BoardPostCompletion, BoardPostTarget, ChatMessage, ChatMessageUi, MessageRole,
-    ProcessStep,
+    AgentMeta, BoardPostCompletion, BoardPostTarget, ChatMessage, ChatMessageUi, FavoriteQuestion,
+    MessageRole, ProcessStep,
 };
 
 #[derive(Properties, PartialEq)]
@@ -26,12 +26,70 @@ pub struct ChatProps {
     pub on_board_post_complete: Callback<BoardPostCompletion>,
     pub on_example_click: Callback<String>,
     pub on_back_to_agents: Callback<()>,
+    /// 현재 에이전트로 이미 필터링된 즐겨찾기 목록(시작 화면 "내 즐겨찾기" 블록용).
+    #[prop_or_default]
+    pub favorites: Vec<FavoriteQuestion>,
+    /// (agent_id, question) ⭐ 추가/해제 토글(예시질문용).
+    pub on_favorite_toggle: Callback<(String, String)>,
+    /// 즐겨찾기 원클릭 재질문.
+    pub on_favorite_ask: Callback<FavoriteQuestion>,
+    /// 내 질문 말풍선 ⭐ 토글(질문 내용만 전달, 에이전트는 상위에서 결합).
+    pub on_message_favorite_toggle: Callback<String>,
     pub has_agent: bool,
     pub agent_meta: Option<AgentMeta>,
     pub is_authenticated: bool,
     pub on_login_click: Callback<()>,
     #[prop_or_default]
     pub token: Option<String>,
+}
+
+/// 에이전트별 시작화면 예시질문 목록. welcome 분기 렌더와 "예시 출처 판정"(⭐ 노출 조건)에
+/// 동일하게 재사용한다.
+fn example_questions_for(agent_id: Option<&str>) -> Vec<&'static str> {
+    match agent_id {
+        Some("ehs-permit-agent") => vec![
+            "오늘 확인 대기 중인 위험작업 허가 목록 보여줘",
+            "이번 주 작업 전 계획서 제출 현황 요약해줘",
+            "작업 전 체크리스트에서 미완료 항목 찾아줘",
+            "오늘 TBM 서명 미완료자 현황 보여줘",
+        ],
+        Some("ehs-inspection-agent") => vec![
+            "이번 주 순회점검 일정 요약해줘",
+            "지연된 개선조치 현황 보여줘",
+            "합동안전점검 결과 요약 초안 작성해줘",
+            "이번 주 미점검 처리된 순회점검 찾아줘",
+        ],
+        Some("ehs-compliance-agent") => vec![
+            "산업안전보건법 최신 법령 개정 내용 요약해줘",
+            "중대재해 점검 항목 정리해줘",
+            "최근 안전보건위원회 회의 안건과 참석자 현황 보여줘",
+            "관리자 준수 책임을 설명해줘",
+        ],
+        Some("ehs-education-agent") => vec![
+            "이번 달 예정된 교육 계획과 강사 배정 현황 보여줘",
+            "미이수 교육 대상자와 재시험 대상자 확인해줘",
+            "진행 중인 설문 목록과 응답 현황 요약해줘",
+            "교육 관련 알림 발송과 완료 처리 현황 보여줘",
+        ],
+        Some("ehs-health-environment-agent") => vec![
+            "유해화학물질 분석 완료 현황과 법규 대상 성분 요약해줘",
+            "작업환경측정 결과에서 노출기준 초과 공정 찾아줘",
+            "정기건강검진 미수검자와 사후관리 대상자 현황 보여줘",
+            "비상연락망, 비상훈련, 구급함 점검 현황을 한 번에 요약해줘",
+        ],
+        Some("ehs-accident-agent") => vec![
+            "최근 사고 보고와 첨부파일 현황 보여줘",
+            "기한이 임박한 아차사고 조치 확인해줘",
+            "유해위험요인 신고와 개선 현황 요약해줘",
+            "수급업체 결재선과 대외문서 이력 검토해줘",
+        ],
+        _ => vec![
+            "현재 위험작업 현황 보여줘",
+            "이번 달 점검 계획 요약해줘",
+            "등록된 MSDS 목록 보여줘",
+            "최근 사고 추세 분석해줘",
+        ],
+    }
 }
 
 #[function_component(ChatArea)]
@@ -89,56 +147,21 @@ pub fn chat_area(props: &ChatProps) -> Html {
     let show_welcome = props.messages.is_empty() && !props.is_loading;
 
     if show_welcome {
-        let examples = match props.agent_meta.as_ref().map(|m| m.id.as_str()) {
-            Some("ehs-permit-agent") => vec![
-                "오늘 확인 대기 중인 위험작업 허가 목록 보여줘",
-                "이번 주 작업 전 계획서 제출 현황 요약해줘",
-                "작업 전 체크리스트에서 미완료 항목 찾아줘",
-                "오늘 TBM 서명 미완료자 현황 보여줘",
-            ],
-            Some("ehs-inspection-agent") => vec![
-                "이번 주 순회점검 일정 요약해줘",
-                "지연된 개선조치 현황 보여줘",
-                "합동안전점검 결과 요약 초안 작성해줘",
-                "이번 주 미점검 처리된 순회점검 찾아줘",
-            ],
-            Some("ehs-compliance-agent") => vec![
-                "산업안전보건법 최신 법령 개정 내용 요약해줘",
-                "중대재해 점검 항목 정리해줘",
-                "최근 안전보건위원회 회의 안건과 참석자 현황 보여줘",
-                "관리자 준수 책임을 설명해줘",
-            ],
-            Some("ehs-education-agent") => vec![
-                "이번 달 예정된 교육 계획과 강사 배정 현황 보여줘",
-                "미이수 교육 대상자와 재시험 대상자 확인해줘",
-                "진행 중인 설문 목록과 응답 현황 요약해줘",
-                "교육 관련 알림 발송과 완료 처리 현황 보여줘",
-            ],
-            Some("ehs-health-environment-agent") => vec![
-                "유해화학물질 분석 완료 현황과 법규 대상 성분 요약해줘",
-                "작업환경측정 결과에서 노출기준 초과 공정 찾아줘",
-                "정기건강검진 미수검자와 사후관리 대상자 현황 보여줘",
-                "비상연락망, 비상훈련, 구급함 점검 현황을 한 번에 요약해줘",
-            ],
-            Some("ehs-accident-agent") => vec![
-                "최근 사고 보고와 첨부파일 현황 보여줘",
-                "기한이 임박한 아차사고 조치 확인해줘",
-                "유해위험요인 신고와 개선 현황 요약해줘",
-                "수급업체 결재선과 대외문서 이력 검토해줘",
-            ],
-            _ => vec![
-                "현재 위험작업 현황 보여줘",
-                "이번 달 점검 계획 요약해줘",
-                "등록된 MSDS 목록 보여줘",
-                "최근 사고 추세 분석해줘",
-            ],
-        };
+        let examples = example_questions_for(props.agent_meta.as_ref().map(|m| m.id.as_str()));
         let agent_class = props.agent_meta.as_ref().map(|m| m.css_class).unwrap_or("");
         let agent_name = props
             .agent_meta
             .as_ref()
             .map(|m| m.name.as_str())
             .unwrap_or("EHS AI Agent");
+        // 현재 에이전트 id와, 이미 즐겨찾기에 담긴 질문 텍스트 집합(별 채움 판정용).
+        let agent_id = props
+            .agent_meta
+            .as_ref()
+            .map(|m| m.id.clone())
+            .unwrap_or_default();
+        let favorited_set: std::collections::HashSet<String> =
+            props.favorites.iter().map(|f| f.question.clone()).collect();
         let back_to_agents = {
             let cb = props.on_back_to_agents.clone();
             Callback::from(move |_: MouseEvent| cb.emit(()))
@@ -150,17 +173,58 @@ pub fn chat_area(props: &ChatProps) -> Html {
                     <div class={classes!("welcome-agent-icon", agent_class)}></div>
                     <h2>{ format!("{}와 대화를 시작해보세요", agent_name) }</h2>
                     <p>{ "아래 예시 질문을 클릭하거나 궁금한 점을 직접 입력해 주세요." }</p>
+                    { if props.favorites.is_empty() {
+                        html! {}
+                    } else {
+                        html! {
+                            <div class="welcome-favorites">
+                                <div class="welcome-favorites-title">{ "⭐ 내 즐겨찾기" }</div>
+                                <div class="welcome-favorites-chips">
+                                    { for props.favorites.iter().map(|fav| {
+                                        let fav_clone = fav.clone();
+                                        let cb = props.on_favorite_ask.clone();
+                                        html! {
+                                            <button type="button" class="favorite-chip"
+                                                onclick={Callback::from(move |_: MouseEvent| cb.emit(fav_clone.clone()))}
+                                                title={fav.question.clone()}
+                                            >
+                                                <span class="favorite-chip-star">{ "⭐" }</span>
+                                                <span class="favorite-chip-text">{ &fav.question }</span>
+                                            </button>
+                                        }
+                                    })}
+                                </div>
+                            </div>
+                        }
+                    }}
                     <div class="welcome-examples">
                         { for examples.into_iter().map(|ex| {
                             let text = ex.to_string();
                             let cb = props.on_example_click.clone();
                             let emitted = text.clone();
+                            let is_fav = favorited_set.contains(&text);
+                            let on_star = {
+                                let toggle = props.on_favorite_toggle.clone();
+                                let agent_id = agent_id.clone();
+                                let q = text.clone();
+                                Callback::from(move |e: MouseEvent| {
+                                    e.stop_propagation();
+                                    toggle.emit((agent_id.clone(), q.clone()));
+                                })
+                            };
                             html! {
                                 <div class="welcome-example"
                                     onclick={Callback::from(move |_: MouseEvent| cb.emit(emitted.clone()))}
                                 >
                                     <span class="example-icon">{ "💡" }</span>
                                     <span class="example-text">{ text }</span>
+                                    <button type="button"
+                                        class={classes!("example-fav-star", is_fav.then_some("active"))}
+                                        onclick={on_star}
+                                        title={ if is_fav { "즐겨찾기 해제" } else { "즐겨찾기에 추가" } }
+                                    >
+                                        { if is_fav { "⭐" } else { "☆" } }
+                                    </button>
                                 </div>
                             }
                         })}
@@ -189,10 +253,29 @@ pub fn chat_area(props: &ChatProps) -> Html {
             </>
         }
     } else {
+        let favorited_set: std::collections::HashSet<String> =
+            props.favorites.iter().map(|f| f.question.clone()).collect();
+        // 현재 에이전트 예시질문 집합(예시 출처 메시지에는 ⭐ 미표시).
+        let example_set: std::collections::HashSet<&str> =
+            example_questions_for(props.agent_meta.as_ref().map(|m| m.id.as_str()))
+                .into_iter()
+                .collect();
         html! {
             <>
                 <div class="messages">
-                    { for props.messages.iter().map(|msg| {
+                    { for props.messages.iter().enumerate().map(|(i, msg)| {
+                        let is_user = matches!(msg.role, MessageRole::User);
+                        let is_favorited = is_user && favorited_set.contains(&msg.content);
+                        // 예시질문/종류 선택 칩으로 보낸 메시지에는 즐겨찾기 버튼을 숨긴다.
+                        let from_example = is_user && example_set.contains(msg.content.as_str());
+                        let from_suggestion = is_user
+                            && i > 0
+                            && matches!(props.messages[i - 1].role, MessageRole::Assistant)
+                            && props.messages[i - 1]
+                                .suggestions
+                                .as_ref()
+                                .map_or(false, |s| s.contains(&msg.content));
+                        let can_favorite = is_user && !from_example && !from_suggestion;
                         let ui_key = match &msg.ui {
                             Some(ChatMessageUi::BoardPostMenu) => "menu",
                             Some(ChatMessageUi::BoardPostEditMenu) => "edit-menu",
@@ -212,6 +295,9 @@ pub fn chat_area(props: &ChatProps) -> Html {
                                 on_select_response_page={props.on_select_response_page.clone()}
                                 on_board_post_target_selected={props.on_board_post_target_selected.clone()}
                                 on_board_post_complete={props.on_board_post_complete.clone()}
+                                on_favorite_toggle={props.on_message_favorite_toggle.clone()}
+                                is_favorited={is_favorited}
+                                can_favorite={can_favorite}
                                 regenerate_disabled={props.is_loading}
                                 token={props.token.clone()}
                             />

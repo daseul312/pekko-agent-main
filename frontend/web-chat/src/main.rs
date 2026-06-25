@@ -14,14 +14,15 @@ use components::header::ChatHeader;
 use components::input::ChatInput;
 use components::sidebar::Sidebar;
 use types::{
-    AgentMeta, AuthUser, BoardPostCompletion, ChatMessage, ChatMessageUi, ChatSession, MessageRole,
-    OldNewComparison, ProcessEvent, ProcessStep, ResponseVersion, TokenUsage,
-    BOARD_POST_ANALYZING_AGENT_ID, COMPLIANCE_AGENT_ID, OTHER_AGENT_ID,
+    AgentMeta, AuthUser, BoardPostCompletion, ChatMessage, ChatMessageUi, ChatSession,
+    FavoriteQuestion, MessageRole, OldNewComparison, ProcessEvent, ProcessStep, ResponseVersion,
+    TokenUsage, BOARD_POST_ANALYZING_AGENT_ID, COMPLIANCE_AGENT_ID, OTHER_AGENT_ID,
 };
 
 const THEME_STORAGE_KEY: &str = "pekko_theme_dark";
 
 const STORAGE_KEY: &str = "pekko_chat_sessions";
+const FAVORITES_STORAGE_KEY: &str = "pekko_favorite_questions";
 const PENDING_PERMIT_WORK_TYPES: [&str; 10] = [
     "공통작업",
     "화기작업",
@@ -948,6 +949,12 @@ enum DeleteTarget {
     All,
 }
 
+/// 즐겨찾기 목록에서 `(agent_id, question)`이 일치하는 항목의 인덱스를 찾는다(중복/토글 판정용).
+fn find_favorite(list: &[FavoriteQuestion], agent_id: &str, question: &str) -> Option<usize> {
+    list.iter()
+        .position(|f| f.agent_id == agent_id && f.question == question)
+}
+
 #[function_component(App)]
 fn app() -> Html {
     // State
@@ -965,6 +972,13 @@ fn app() -> Html {
     let toast_tick = use_state(|| 0u32);
     let sessions =
         use_state(|| LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY).unwrap_or_default());
+    // 즐겨찾기 질문 템플릿(localStorage 보관). 원클릭 재질문 대기열은 pending_fav_send로 처리.
+    let favorites = use_state(|| {
+        LocalStorage::get::<Vec<FavoriteQuestion>>(FAVORITES_STORAGE_KEY).unwrap_or_default()
+    });
+    // 사이드바에서 즐겨찾기를 눌러 다른 에이전트로 진입할 때, 에이전트 전환(상태 비동기) 후
+    // 전송해야 하므로 (agent_id, question)을 잠시 보관했다가 effect에서 전송한다.
+    let pending_fav_send = use_state(|| Option::<(String, String)>::None);
     let is_loading = use_state(|| false);
     let live_steps = use_state(Vec::<ProcessStep>::new);
     let health_status = use_state(|| Option::<String>::None);
@@ -995,6 +1009,15 @@ fn app() -> Html {
         let sessions_state = sessions.clone();
         use_effect_with((*sessions_state).clone(), move |s| {
             let _ = LocalStorage::set(STORAGE_KEY, s);
+            || ()
+        });
+    }
+
+    // Persist favorites when they change
+    {
+        let favorites_state = favorites.clone();
+        use_effect_with((*favorites_state).clone(), move |f| {
+            let _ = LocalStorage::set(FAVORITES_STORAGE_KEY, f);
             || ()
         });
     }
@@ -1825,6 +1848,108 @@ fn app() -> Html {
 
     let on_example_click = on_send.clone();
 
+    // ── 즐겨찾기 콜백 ──
+    // ⭐ 추가/해제 토글. (agent_id, question)이 이미 있으면 제거, 없으면 추가.
+    let on_favorite_toggle = {
+        let favorites = favorites.clone();
+        Callback::from(move |(agent_id, question): (String, String)| {
+            let mut list = (*favorites).clone();
+            if let Some(idx) = find_favorite(&list, &agent_id, &question) {
+                list.remove(idx);
+            } else {
+                list.push(FavoriteQuestion {
+                    id: Uuid::new_v4(),
+                    agent_id,
+                    question,
+                    created_at: chrono::Utc::now(),
+                });
+            }
+            favorites.set(list);
+        })
+    };
+
+    // 사이드바 X 버튼: id로 즐겨찾기 제거.
+    let on_favorite_delete = {
+        let favorites = favorites.clone();
+        Callback::from(move |fav_id: Uuid| {
+            let mut list = (*favorites).clone();
+            list.retain(|f| f.id != fav_id);
+            favorites.set(list);
+        })
+    };
+
+    // 원클릭 재질문. 항상 새 대화창에서 처리한다(같은 에이전트가 열려 있어도 현재 대화에
+    // 이어 붙이지 않고 초기화). 해당 에이전트로 진입한 뒤(상태 비동기) pending_fav_send에
+    // 담아 effect에서 전송한다. pending이 바뀌면 effect가 다시 돌아 같은 에이전트에서도 발송됨.
+    let on_favorite_ask = {
+        let selected_agent_id = selected_agent_id.clone();
+        let messages = messages.clone();
+        let session_id = session_id.clone();
+        let use_router = use_router.clone();
+        let active_routed_agent_ids = active_routed_agent_ids.clone();
+        let is_loading = is_loading.clone();
+        let live_steps = live_steps.clone();
+        let pending_fav_send = pending_fav_send.clone();
+        Callback::from(move |fav: FavoriteQuestion| {
+            // 이전 답변이 처리 중이어도 막지 않는다. 진행 중이던 답변은 백그라운드(세션 pending)
+            // 에서 계속되며, 새 대화 화면이 '답변 중'으로 보이지 않도록 화면 로딩만 초기화한다.
+            selected_agent_id.set(Some(fav.agent_id.clone()));
+            messages.set(vec![]);
+            session_id.set(None);
+            use_router.set(false);
+            active_routed_agent_ids.set(vec![fav.agent_id.clone()]);
+            is_loading.set(false);
+            live_steps.set(vec![]);
+            pending_fav_send.set(Some((fav.agent_id.clone(), fav.question.clone())));
+        })
+    };
+
+    // 지연 전송: 새 대화 초기화(에이전트 진입 + messages/session 리셋)가 반영된 뒤
+    // 대기 중인 질문을 새 세션으로 전송한다.
+    {
+        let selected_agent_id = selected_agent_id.clone();
+        let pending_fav_send = pending_fav_send.clone();
+        let on_send = on_send.clone();
+        use_effect_with(
+            ((*selected_agent_id).clone(), (*pending_fav_send).clone()),
+            move |(sel, pending)| {
+                if let Some((agent_id, question)) = pending {
+                    if sel.as_deref() == Some(agent_id.as_str()) {
+                        on_send.emit(question.clone());
+                        pending_fav_send.set(None);
+                    }
+                }
+                || ()
+            },
+        );
+    }
+
+    // MessageBubble(내 질문 ⭐)용: 현재 에이전트 id를 결합해 (agent_id, question)으로 토글.
+    // 현재 에이전트 = selected_agent_id 우선, 없으면 현재 세션의 agent_id.
+    let current_favorite_agent_id: Option<String> = (*selected_agent_id).clone().or_else(|| {
+        (*session_id)
+            .and_then(|sid| (*sessions).iter().find(|s| s.id == sid).map(|s| s.agent_id.clone()))
+    });
+    let on_message_favorite_toggle = {
+        let on_favorite_toggle = on_favorite_toggle.clone();
+        let current_favorite_agent_id = current_favorite_agent_id.clone();
+        Callback::from(move |question: String| {
+            if let Some(agent_id) = current_favorite_agent_id.clone() {
+                on_favorite_toggle.emit((agent_id, question));
+            }
+        })
+    };
+
+    // 현재 에이전트로 필터링한 즐겨찾기(시작 화면 "내 즐겨찾기" 블록 + 메시지 별 채움 판정용).
+    let current_favorites: Vec<FavoriteQuestion> = match &current_favorite_agent_id {
+        Some(aid) => (*favorites)
+            .iter()
+            .filter(|f| &f.agent_id == aid)
+            .cloned()
+            .collect(),
+        None => vec![],
+    };
+
     // Resolve selected agent meta
     let selected_meta = (*selected_agent_id)
         .as_ref()
@@ -1900,6 +2025,9 @@ fn app() -> Html {
                     on_pin_session={on_pin_session}
                     on_rename_click={on_rename_click}
                     health_status={(*health_status).clone()}
+                    favorites={(*favorites).clone()}
+                    on_favorite_ask={on_favorite_ask.clone()}
+                    on_favorite_delete={on_favorite_delete.clone()}
                 />
             { if *is_mobile_sidebar_open {
                 html! {
@@ -1947,6 +2075,10 @@ fn app() -> Html {
                         on_board_post_complete={on_board_post_complete.clone()}
                         on_example_click={on_example_click.clone()}
                         on_back_to_agents={on_back_to_agents.clone()}
+                        favorites={current_favorites.clone()}
+                        on_favorite_toggle={on_favorite_toggle.clone()}
+                        on_favorite_ask={on_favorite_ask.clone()}
+                        on_message_favorite_toggle={on_message_favorite_toggle.clone()}
                         has_agent=true
                         agent_meta={Some(meta)}
                         is_authenticated={auth_user.is_some()}
@@ -1976,6 +2108,10 @@ fn app() -> Html {
                         on_board_post_complete={on_board_post_complete.clone()}
                         on_example_click={on_example_click.clone()}
                         on_back_to_agents={on_back_to_agents.clone()}
+                        favorites={current_favorites.clone()}
+                        on_favorite_toggle={on_favorite_toggle.clone()}
+                        on_favorite_ask={on_favorite_ask.clone()}
+                        on_message_favorite_toggle={on_message_favorite_toggle.clone()}
                         has_agent=true
                         agent_meta={None}
                         is_authenticated={auth_user.is_some()}
