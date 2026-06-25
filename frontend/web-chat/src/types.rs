@@ -281,6 +281,10 @@ pub struct ChatMessage {
     /// `#[serde(default)]` keeps older persisted sessions deserializable.
     #[serde(default)]
     pub process_steps: Vec<ProcessStep>,
+    /// 자동 라우팅 근거 한 줄 안내(예: "🧭 자동 라우팅: 허가 관리 에이전트가 답변했어요.").
+    /// 사용자가 직접 에이전트를 고른 경우(direct)나 차단(blocked)에는 `None`.
+    #[serde(default)]
+    pub routing_note: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

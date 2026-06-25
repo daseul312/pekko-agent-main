@@ -203,6 +203,7 @@ fn build_user_message(content: String, request_content: String) -> ChatMessage {
         ui: None,
         board_post_target: None,
         process_steps: Vec::new(),
+        routing_note: None,
     }
 }
 
@@ -238,6 +239,45 @@ fn build_assistant_message(version: ResponseVersion) -> ChatMessage {
         ui: None,
         board_post_target: None,
         process_steps: Vec::new(),
+        routing_note: None,
+    }
+}
+
+/// 에이전트 id를 사람이 읽는 표시명으로 바꾼다(매칭 실패 시 id 그대로).
+fn agent_display_name(id: &str) -> String {
+    AgentMeta::defaults()
+        .iter()
+        .find(|a| a.id == id)
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| id.to_string())
+}
+
+/// 자동 라우팅 결과를 사용자에게 한 줄로 설명하는 안내 문구를 만든다.
+/// `route_kind`와 실제 답변 에이전트 목록만으로 결정적으로 생성하므로 백엔드의
+/// 코드형 `rationale` 문자열에 의존하지 않는다. 사용자가 직접 에이전트를 고른
+/// 경우(`direct`)나 비-EHS 차단(`blocked`)에는 안내를 생략한다(`None`).
+fn build_routing_note(route_kind: &str, routed_agent_ids: &[String]) -> Option<String> {
+    match route_kind {
+        "smart_single" => {
+            let id = routed_agent_ids.first()?;
+            Some(format!(
+                "🧭 자동 라우팅: {} 에이전트가 답변했어요.",
+                agent_display_name(id)
+            ))
+        }
+        "multi_agent" => {
+            if routed_agent_ids.is_empty() {
+                return None;
+            }
+            let names = routed_agent_ids
+                .iter()
+                .map(|id| agent_display_name(id))
+                .collect::<Vec<_>>()
+                .join(" + ");
+            Some(format!("🧭 자동 라우팅: {names} 에이전트가 함께 답변했어요."))
+        }
+        // "direct"(사용자가 직접 선택)와 "blocked"(비-EHS 차단)는 안내 생략.
+        _ => None,
     }
 }
 
@@ -257,6 +297,7 @@ fn build_board_post_menu_message() -> ChatMessage {
         ui: Some(ChatMessageUi::BoardPostMenu),
         board_post_target: None,
         process_steps: Vec::new(),
+        routing_note: None,
     }
 }
 
@@ -276,6 +317,7 @@ fn build_board_post_edit_menu_message() -> ChatMessage {
         ui: Some(ChatMessageUi::BoardPostEditMenu),
         board_post_target: None,
         process_steps: Vec::new(),
+        routing_note: None,
     }
 }
 
@@ -295,6 +337,7 @@ fn build_board_post_delete_menu_message() -> ChatMessage {
         ui: Some(ChatMessageUi::BoardPostDeleteMenu),
         board_post_target: None,
         process_steps: Vec::new(),
+        routing_note: None,
     }
 }
 
@@ -314,6 +357,7 @@ fn build_board_post_auth_required_message() -> ChatMessage {
         ui: None,
         board_post_target: None,
         process_steps: Vec::new(),
+        routing_note: None,
     }
 }
 
@@ -338,6 +382,7 @@ fn build_pending_permit_work_type_prompt_message() -> ChatMessage {
         ui: None,
         board_post_target: None,
         process_steps: Vec::new(),
+        routing_note: None,
     }
 }
 
@@ -357,6 +402,7 @@ fn build_board_post_result_message(completion: BoardPostCompletion) -> ChatMessa
         ui: None,
         board_post_target: None,
         process_steps: Vec::new(),
+        routing_note: None,
     }
 }
 
@@ -564,9 +610,16 @@ fn submit_query(
     request_content: String,
     current_msgs: Vec<ChatMessage>,
     regenerate_target_id: Option<String>,
+    // 특정 에이전트로 강제 재요청("다른 에이전트로 재시도"). 지정되면 스마트 라우터/
+    // 헤더 선택을 무시하고 이 에이전트로 보낸다.
+    agent_override: Option<String>,
 ) {
-    let route_via_router = *use_router || (*selected_agent_id).is_none();
-    let is_regeneration = regenerate_target_id.is_some();
+    // override가 있으면 그 에이전트로 직접 라우팅(스마트 라우터 우회).
+    let route_via_router =
+        agent_override.is_none() && (*use_router || (*selected_agent_id).is_none());
+    // 재생성(같은 라우팅 재실행)과 에이전트 재시도 모두 "재요청"으로 취급한다
+    // (새 질문이 아니므로 사이드바 last_message/제목을 갱신하지 않는다).
+    let is_regeneration = regenerate_target_id.is_some() || agent_override.is_some();
 
     // 답변을 비동기 작업처럼 다루기 위해 session_id를 미리 확정한다(새 대화도 즉시 식별 가능
     // → 창을 닫아도 재진입 시 이 id로 답변을 폴링해 이어받는다).
@@ -628,7 +681,10 @@ fn submit_query(
 
         // Route via the smart router (no specific agent) or directly to the
         // selected agent. Both paths stream live processing steps.
-        let agent_id_opt: Option<String> = if route_via_router {
+        // 재시도 override가 있으면 항상 그 에이전트로 직접 보낸다.
+        let agent_id_opt: Option<String> = if let Some(forced) = agent_override.clone() {
+            Some(forced)
+        } else if route_via_router {
             None
         } else {
             active_agent_id.clone()
@@ -683,6 +739,15 @@ fn submit_query(
                     msgs.push(board_post_message);
                 } else {
                     let assistant_suggestions = extract_suggestions(&content, &resp.response);
+                    // 재시도(에이전트 강제 지정)면 "직접 선택" 라벨을, 그 외에는 자동 라우팅 근거를 단다.
+                    let routing_note = if let Some(forced) = agent_override.as_ref() {
+                        Some(format!(
+                            "🔀 {} 에이전트로 재시도한 답변이에요.",
+                            agent_display_name(forced)
+                        ))
+                    } else {
+                        build_routing_note(&resp.route_kind, &routed_agent_ids)
+                    };
                     let response_version = build_response_version(
                         resp.response.clone(),
                         resp.tools_used.clone(),
@@ -699,11 +764,13 @@ fn submit_query(
                         ) {
                             let mut assistant_msg = build_assistant_message(response_version);
                             assistant_msg.process_steps = final_steps.clone();
+                            assistant_msg.routing_note = routing_note;
                             msgs.push(assistant_msg);
                         }
                     } else {
                         let mut assistant_msg = build_assistant_message(response_version);
                         assistant_msg.process_steps = final_steps.clone();
+                        assistant_msg.routing_note = routing_note;
                         msgs.push(assistant_msg);
                     }
                 }
@@ -785,6 +852,7 @@ fn submit_query(
                         ui: None,
                         board_post_target: None,
                         process_steps: Vec::new(),
+                        routing_note: None,
                     };
                     let mut msgs = current_msgs.clone();
                     msgs.push(err_msg);
@@ -1537,6 +1605,7 @@ fn app() -> Html {
                 request_content,
                 new_msgs,
                 None,
+                None,
             );
         })
     };
@@ -1576,6 +1645,49 @@ fn app() -> Html {
                 request_content,
                 (*messages).clone(),
                 Some(assistant_message_id),
+                None,
+            );
+        })
+    };
+
+    // "다른 에이전트로 재시도": 같은 질문을 사용자가 고른 에이전트로 강제 재요청하고
+    // 결과를 새 메시지 버블로 추가한다(regenerate_target_id=None → 새 버블, agent_override=선택).
+    let on_retry_with_agent = {
+        let messages = messages.clone();
+        let session_id = session_id.clone();
+        let sessions = sessions.clone();
+        let is_loading = is_loading.clone();
+        let live_steps = live_steps.clone();
+        let selected_agent_id = selected_agent_id.clone();
+        let use_router = use_router.clone();
+        let active_routed_agent_ids = active_routed_agent_ids.clone();
+        let current_sid_ref = current_sid_ref.clone();
+        Callback::from(move |(assistant_message_id, agent_id): (String, String)| {
+            if *is_loading {
+                return;
+            }
+
+            let Some((content, request_content)) =
+                find_regeneration_request((*messages).as_slice(), &assistant_message_id)
+            else {
+                return;
+            };
+
+            submit_query(
+                messages.clone(),
+                session_id.clone(),
+                sessions.clone(),
+                is_loading.clone(),
+                live_steps.clone(),
+                selected_agent_id.clone(),
+                use_router.clone(),
+                active_routed_agent_ids.clone(),
+                current_sid_ref.clone(),
+                content,
+                request_content,
+                (*messages).clone(),
+                None,
+                Some(agent_id),
             );
         })
     };
@@ -1775,6 +1887,7 @@ fn app() -> Html {
                         live_steps={(*live_steps).clone()}
                         on_send={on_send.clone()}
                         on_regenerate={on_regenerate.clone()}
+                        on_retry_with_agent={on_retry_with_agent.clone()}
                         on_select_response_page={on_select_response_page.clone()}
                         on_board_post_target_selected={on_board_post_target_selected.clone()}
                         on_board_post_complete={on_board_post_complete.clone()}
@@ -1802,6 +1915,7 @@ fn app() -> Html {
                         live_steps={(*live_steps).clone()}
                         on_send={on_send.clone()}
                         on_regenerate={on_regenerate.clone()}
+                        on_retry_with_agent={on_retry_with_agent.clone()}
                         on_select_response_page={on_select_response_page.clone()}
                         on_board_post_target_selected={on_board_post_target_selected.clone()}
                         on_board_post_complete={on_board_post_complete.clone()}

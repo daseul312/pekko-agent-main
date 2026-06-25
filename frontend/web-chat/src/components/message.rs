@@ -6,7 +6,7 @@ use yew::prelude::*;
 use crate::components::board_post::{BoardPostFlow, BoardPostMenuForm};
 use crate::markdown;
 use crate::types::{
-    BoardPostCompletion, BoardPostTarget, ChatMessage, ChatMessageUi, MessageRole,
+    AgentMeta, BoardPostCompletion, BoardPostTarget, ChatMessage, ChatMessageUi, MessageRole,
     OldNewArticleComparison, OldNewComparison, OldNewLawInfo, ProcessStep, StepStatus,
 };
 
@@ -27,6 +27,8 @@ enum CopyStatus {
 pub struct MessageProps {
     pub message: ChatMessage,
     pub on_regenerate: Callback<String>,
+    /// "다른 에이전트로 재시도": (assistant 메시지 id, 선택한 agent id).
+    pub on_retry_with_agent: Callback<(String, String)>,
     pub on_select_response_page: Callback<(String, usize)>,
     pub on_board_post_target_selected: Callback<BoardPostTarget>,
     pub on_board_post_complete: Callback<BoardPostCompletion>,
@@ -39,6 +41,7 @@ pub struct MessageProps {
 pub fn message_bubble(props: &MessageProps) -> Html {
     let msg = &props.message;
     let copy_status = use_state(|| CopyStatus::Idle);
+    let retry_menu_open = use_state(|| false);
     let is_assistant = matches!(msg.role, MessageRole::Assistant);
     let board_post_route_flow = board_post_route_flow(&msg.content);
     let is_rendered_markdown = matches!(msg.role, MessageRole::Assistant | MessageRole::System)
@@ -229,6 +232,62 @@ pub fn message_bubble(props: &MessageProps) -> Html {
         html! {}
     };
 
+    // "다른 에이전트로 재시도" 드롭다운: 같은 질문을 사용자가 고른 에이전트로
+    // 다시 보내 새 답변 버블을 추가한다. 자동 라우팅이 틀렸을 때의 인라인 교정 수단.
+    let retry_agent_btn = if is_assistant && msg.ui.is_none() {
+        let is_open = *retry_menu_open;
+        let toggle = {
+            let retry_menu_open = retry_menu_open.clone();
+            Callback::from(move |_: MouseEvent| retry_menu_open.set(!*retry_menu_open))
+        };
+        let menu = if is_open {
+            let items = AgentMeta::defaults()
+                .into_iter()
+                .map(|agent| {
+                    let on_pick = {
+                        let on_retry_with_agent = props.on_retry_with_agent.clone();
+                        let retry_menu_open = retry_menu_open.clone();
+                        let message_id = msg.id.clone();
+                        let agent_id = agent.id.clone();
+                        Callback::from(move |_: MouseEvent| {
+                            retry_menu_open.set(false);
+                            on_retry_with_agent.emit((message_id.clone(), agent_id.clone()));
+                        })
+                    };
+                    html! {
+                        <button
+                            class="retry-agent-item"
+                            onclick={on_pick}
+                            disabled={props.regenerate_disabled}
+                        >
+                            <span class="retry-agent-name">{ agent.name.clone() }</span>
+                            <span class="retry-agent-desc">{ agent.description.clone() }</span>
+                        </button>
+                    }
+                })
+                .collect::<Html>();
+            html! { <div class="retry-agent-menu">{ items }</div> }
+        } else {
+            html! {}
+        };
+
+        html! {
+            <div class="retry-agent-wrap">
+                <button
+                    class="retry-agent-btn"
+                    onclick={toggle}
+                    disabled={props.regenerate_disabled}
+                    title="다른 에이전트로 재시도"
+                >
+                    { "🔀 다른 에이전트로 재시도" }
+                </button>
+                { menu }
+            </div>
+        }
+    } else {
+        html! {}
+    };
+
     let download_btn = if has_table && is_rendered_markdown {
         let id = msg_id.clone();
         html! {
@@ -289,11 +348,15 @@ pub fn message_bubble(props: &MessageProps) -> Html {
                 if is_assistant && !msg.process_steps.is_empty() {
                     <ProcessSteps steps={msg.process_steps.clone()} is_live=false />
                 }
+                if let Some(note) = msg.routing_note.as_ref() {
+                    <div class="routing-note">{ note }</div>
+                }
                 { content_html }
                 { law_compare_html }
                 <div class="message-actions">
                     { copy_btn }
                     { regenerate_btn }
+                    { retry_agent_btn }
                     { download_btn }
                 </div>
                 if show_meta {

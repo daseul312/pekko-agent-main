@@ -2506,6 +2506,92 @@
         border-color: var(--border);
         color: var(--muted);
       }
+      /* ── Routing rationale note (자동 라우팅 근거 한 줄) ── */
+      .routing-note {
+        font-size: 12px;
+        color: var(--muted);
+        margin: 0 0 6px 2px;
+        padding: 4px 10px;
+        border-left: 2px solid var(--accent);
+        background: var(--accent-soft);
+        border-radius: var(--radius-sm);
+        line-height: 1.4;
+        opacity: 0.9;
+      }
+      /* ── Retry with another agent (다른 에이전트로 재시도) ── */
+      .retry-agent-wrap {
+        position: relative;
+        display: inline-flex;
+      }
+      .retry-agent-btn {
+        font-size: 12px;
+        padding: 5px 10px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: transparent;
+        cursor: pointer;
+        color: var(--muted);
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        transition: all 0.15s ease;
+      }
+      .retry-agent-btn:hover {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .retry-agent-btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      .retry-agent-menu {
+        position: absolute;
+        bottom: calc(100% + 6px);
+        left: 0;
+        z-index: 30;
+        min-width: 220px;
+        max-width: 280px;
+        background: var(--assistant-bubble, #fff);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+        padding: 4px;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .retry-agent-item {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 2px;
+        width: 100%;
+        text-align: left;
+        padding: 7px 10px;
+        border: none;
+        background: transparent;
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        transition: background 0.12s ease;
+      }
+      .retry-agent-item:hover {
+        background: var(--accent-soft);
+      }
+      .retry-agent-item:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      .retry-agent-name {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text, #1e293b);
+      }
+      .retry-agent-desc {
+        font-size: 11px;
+        color: var(--muted);
+        line-height: 1.3;
+      }
       /* ── Download Button ── */
       .download-csv-btn {
         padding: 5px 10px;

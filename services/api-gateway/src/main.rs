@@ -85,6 +85,10 @@ struct QueryResponse {
     route_kind: String,
     /// The agent ids that actually served this request.
     routed_agent_ids: Vec<String>,
+    /// 라우팅 근거(예: "keyword_fallback", "other", LLM 분류 사유). 프론트엔드가
+    /// "왜 이 에이전트가 답변했는지" 한 줄 안내를 만들 때 분기 입력으로 사용한다.
+    #[serde(default)]
+    rationale: String,
     /// 신구법비교(법령 개정 신·구 조문) 구조화 데이터. 법령 조회 도구가
     /// 호출됐을 때만 채워지고, 그 외에는 직렬화에서 생략된다.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -746,6 +750,7 @@ async fn run_agent_query_pipeline(
         token_usage: result.token_usage,
         route_kind: "direct".to_string(),
         routed_agent_ids: vec![agent_id.to_string()],
+        rationale: "direct".to_string(),
         old_new_comparison: result.old_new_comparison,
     })
 }
@@ -1621,6 +1626,7 @@ fn blocked_query_response(session_id: Uuid) -> QueryResponse {
         },
         route_kind: "blocked".to_string(),
         routed_agent_ids: vec![OTHER_AGENT_ID.to_string()],
+        rationale: "no_ehs_keyword_match".to_string(),
         old_new_comparison: None,
     }
 }
@@ -1925,6 +1931,7 @@ async fn run_query_pipeline(
             token_usage: routing_tokens,
             route_kind: "blocked".to_string(),
             routed_agent_ids: vec![OTHER_AGENT_ID.to_string()],
+            rationale: decision.rationale.clone(),
             old_new_comparison: None,
         });
     }
@@ -1964,6 +1971,7 @@ async fn run_query_pipeline(
             token_usage,
             route_kind: "smart_single".to_string(),
             routed_agent_ids: response_routed_agent_ids,
+            rationale: decision.rationale.clone(),
             old_new_comparison: result.old_new_comparison,
         });
     }
@@ -2048,6 +2056,7 @@ async fn run_query_pipeline(
         token_usage: total_tokens,
         route_kind: "multi_agent".to_string(),
         routed_agent_ids: response_routed_agent_ids,
+        rationale: decision.rationale.clone(),
         old_new_comparison: results.iter().find_map(|r| r.old_new_comparison.clone()),
     })
 }

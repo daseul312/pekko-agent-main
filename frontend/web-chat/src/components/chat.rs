@@ -17,6 +17,8 @@ pub struct ChatProps {
     pub live_steps: Vec<ProcessStep>,
     pub on_send: Callback<String>,
     pub on_regenerate: Callback<String>,
+    /// "다른 에이전트로 재시도": (assistant 메시지 id, 선택한 agent id).
+    pub on_retry_with_agent: Callback<(String, String)>,
     pub on_select_response_page: Callback<(String, usize)>,
     pub on_board_post_target_selected: Callback<BoardPostTarget>,
     pub on_board_post_complete: Callback<BoardPostCompletion>,
@@ -203,6 +205,7 @@ pub fn chat_area(props: &ChatProps) -> Html {
                                 key={key}
                                 message={msg.clone()}
                                 on_regenerate={props.on_regenerate.clone()}
+                                on_retry_with_agent={props.on_retry_with_agent.clone()}
                                 on_select_response_page={props.on_select_response_page.clone()}
                                 on_board_post_target_selected={props.on_board_post_target_selected.clone()}
                                 on_board_post_complete={props.on_board_post_complete.clone()}
