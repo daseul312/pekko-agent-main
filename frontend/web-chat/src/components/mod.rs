@@ -1,5 +1,6 @@
 pub mod agent_selector;
 pub mod board_post;
+pub mod chart;
 pub mod chat;
 pub mod header;
 pub mod input;

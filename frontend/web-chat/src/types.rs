@@ -29,6 +29,8 @@ pub struct QueryResponse {
     pub routed_agent_ids: Vec<String>,
     #[serde(default)]
     pub old_new_comparison: Option<OldNewComparison>,
+    #[serde(default)]
+    pub chart_data: Option<ChartData>,
 }
 
 /// Live progress event streamed from the `/stream` endpoints (NDJSON).
@@ -81,6 +83,8 @@ pub struct ResponseVersion {
     pub suggestions: Option<Vec<String>>,
     #[serde(default)]
     pub old_new_comparison: Option<OldNewComparison>,
+    #[serde(default)]
+    pub chart_data: Option<ChartData>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -109,6 +113,32 @@ pub struct OldNewArticleComparison {
     pub change_type: Option<String>,
     pub old_text: Option<String>,
     pub new_text: Option<String>,
+}
+
+/// 백엔드 `ChartData`(api-gateway/src/main.rs)와 1:1로 대응하는 차트 구조.
+/// `visualize` 도구가 호출됐을 때만 채워진다. ChartBlock 컴포넌트가 Chart.js로 렌더.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChartData {
+    /// "bar" | "donut" | "line".
+    pub chart_type: String,
+    pub title: String,
+    pub labels: Vec<String>,
+    pub series: Vec<ChartSeries>,
+    #[serde(default)]
+    pub insight: Option<ChartInsight>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChartSeries {
+    pub name: String,
+    pub values: Vec<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChartInsight {
+    /// "info" | "warn" | "alert".
+    pub level: String,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -270,6 +300,8 @@ pub struct ChatMessage {
     #[serde(default)]
     pub old_new_comparison: Option<OldNewComparison>,
     #[serde(default)]
+    pub chart_data: Option<ChartData>,
+    #[serde(default)]
     pub response_versions: Vec<ResponseVersion>,
     #[serde(default)]
     pub current_response_index: usize,
@@ -331,6 +363,7 @@ impl ChatMessage {
             token_usage: self.token_usage.clone(),
             suggestions: self.suggestions.clone(),
             old_new_comparison: self.old_new_comparison.clone(),
+            chart_data: self.chart_data.clone(),
         });
         self.current_response_index = 0;
     }
@@ -348,6 +381,7 @@ impl ChatMessage {
         self.token_usage = version.token_usage;
         self.suggestions = version.suggestions;
         self.old_new_comparison = version.old_new_comparison;
+        self.chart_data = version.chart_data;
     }
 
     pub fn append_response_version(&mut self, version: ResponseVersion) {

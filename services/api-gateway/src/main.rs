@@ -17,7 +17,7 @@ use tracing::{info, error, warn};
 
 use pekko_agent_core::{Message, TokenUsage, ShortTermMemory, ToolContext, AgentInfo, AgentStatus};
 use pekko_agent_llm::{LlmConfig, ClaudeClient, OpenAIClient, LlmRequest, ClaudeMessage, ContentBlock, ClaudeTool};
-use pekko_agent_tools::{ToolRegistry, builtin::{PermitSearchTool, ComplianceCheckTool, EhsQueryTool, LawCompareTool}};
+use pekko_agent_tools::{ToolRegistry, builtin::{PermitSearchTool, ComplianceCheckTool, EhsQueryTool, LawCompareTool, VisualizeTool}};
 use pekko_agent_memory::{CoreDbConversationStore, InMemoryVectorStore, InMemoryEpisodicStore};
 use coredb::{CoreDB, DatabaseConfig};
 use pekko_agent_orchestrator::OrchestratorActor;
@@ -93,6 +93,10 @@ struct QueryResponse {
     /// 호출됐을 때만 채워지고, 그 외에는 직렬화에서 생략된다.
     #[serde(skip_serializing_if = "Option::is_none")]
     old_new_comparison: Option<OldNewComparison>,
+    /// 답변 내 데이터 시각화(차트) 구조화 데이터. `visualize` 도구가 호출됐을 때만
+    /// 채워지고, 그 외에는 직렬화에서 생략된다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chart_data: Option<ChartData>,
 }
 
 /// 프론트엔드 `OldNewComparison`(web-chat/src/types.rs)과 1:1로 대응하는
@@ -123,6 +127,32 @@ struct OldNewArticleComparison {
     change_type: Option<String>,
     old_text: Option<String>,
     new_text: Option<String>,
+}
+
+/// 프론트엔드 `ChartData`(web-chat/src/types.rs)와 1:1로 대응하는 차트 구조.
+/// `visualize` 도구가 만든 JSON을 그대로 역직렬화한다.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ChartData {
+    /// "bar" | "donut" | "line".
+    chart_type: String,
+    title: String,
+    labels: Vec<String>,
+    series: Vec<ChartSeries>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    insight: Option<ChartInsight>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ChartSeries {
+    name: String,
+    values: Vec<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ChartInsight {
+    /// "info" | "warn" | "alert".
+    level: String,
+    text: String,
 }
 
 /// Phase of a processing step on the wire.
@@ -396,6 +426,8 @@ struct AgentQueryResult {
     token_usage: TokenUsage,
     /// `law_oldnew_comparison` 도구가 호출됐을 때 캡처된 신구법비교 데이터.
     old_new_comparison: Option<OldNewComparison>,
+    /// `visualize` 도구가 호출됐을 때 캡처된 차트 데이터.
+    chart_data: Option<ChartData>,
 }
 
 /// Routing decision produced by the smart router.
@@ -569,7 +601,16 @@ fn build_system_prompt(agent_id: &str, identity: Option<&AuthIdentity>) -> Strin
          - 통계 요약도 테이블로 보여주세요.\n\
          - 테이블 앞뒤에 간단한 설명을 붙이세요.\n\
          - 숫자는 천 단위 쉼표를 사용하세요 (예: 1,234).\n\
-         - 날짜는 YYYY-MM-DD 형식으로 표시하세요."
+         - 날짜는 YYYY-MM-DD 형식으로 표시하세요.\n\
+         \n\
+         [필수] 데이터 시각화:\n\
+         - 답변에 집계 가능한 수치(부서/상태/카테고리별 건수, 기간별 추이 등)가 포함되면 \
+           마크다운 테이블과 함께 visualize 도구를 호출해 차트를 함께 보여주세요.\n\
+         - 차트 종류 선택: 부서/카테고리 비교는 bar, 비율/분포는 donut, 시계열 추이는 line.\n\
+         - labels와 각 series의 values 길이는 반드시 같아야 합니다(테이블 데이터와 일치).\n\
+         - 데이터에서 이상 신호(0건 누락, 기한 임박, 급증·급감, 예상 대비 큰 차이)가 보이면 \
+           visualize 도구의 insight에 한 문장으로 경고하세요(level은 경고면 warn, 위험이면 alert).\n\
+         - 단일 수치나 비교 의미가 없는 결과(목록 1건 등)는 차트를 만들지 마세요."
     )
 }
 
@@ -753,6 +794,7 @@ async fn run_agent_query_pipeline(
         routed_agent_ids: vec![agent_id.to_string()],
         rationale: "direct".to_string(),
         old_new_comparison: result.old_new_comparison,
+        chart_data: result.chart_data,
     })
 }
 
@@ -811,6 +853,7 @@ async fn execute_agent_query(
     let mut final_text = String::new();
     // 신구법비교 도구가 성공하면 그 구조화 결과를 캡처해 최종 응답에 실어 보낸다.
     let mut captured_comparison: Option<OldNewComparison> = None;
+    let mut captured_chart: Option<ChartData> = None;
     // Tracks whether the previous round executed tools, so the next LLM round is
     // labelled as "result review" instead of "initial analysis".
     let mut used_tool_last_round = false;
@@ -1020,6 +1063,16 @@ async fn execute_agent_query(
                                 Err(e) => warn!(error = %e, "신구법비교 구조 파싱 실패"),
                             }
                         }
+                        // 시각화 도구 결과도 동일하게 구조화 데이터로 캡처(첫 성공만).
+                        if tool_name == "visualize"
+                            && !output.is_error
+                            && captured_chart.is_none()
+                        {
+                            match serde_json::from_value::<ChartData>(output.content.clone()) {
+                                Ok(chart) => captured_chart = Some(chart),
+                                Err(e) => warn!(error = %e, "차트 구조 파싱 실패"),
+                            }
+                        }
                         let content = serde_json::to_string(&output.content)
                             .unwrap_or_else(|_| "{}".to_string());
                         let content = truncate_tool_result(&content);
@@ -1150,6 +1203,7 @@ async fn execute_agent_query(
             output_tokens: total_output_tokens,
         },
         old_new_comparison: captured_comparison,
+        chart_data: captured_chart,
     })
 }
 
@@ -1629,6 +1683,7 @@ fn blocked_query_response(session_id: Uuid) -> QueryResponse {
         routed_agent_ids: vec![OTHER_AGENT_ID.to_string()],
         rationale: "no_ehs_keyword_match".to_string(),
         old_new_comparison: None,
+        chart_data: None,
     }
 }
 
@@ -1934,6 +1989,7 @@ async fn run_query_pipeline(
             routed_agent_ids: vec![OTHER_AGENT_ID.to_string()],
             rationale: decision.rationale.clone(),
             old_new_comparison: None,
+            chart_data: None,
         });
     }
 
@@ -1974,6 +2030,7 @@ async fn run_query_pipeline(
             routed_agent_ids: response_routed_agent_ids,
             rationale: decision.rationale.clone(),
             old_new_comparison: result.old_new_comparison,
+            chart_data: result.chart_data,
         });
     }
 
@@ -2059,6 +2116,7 @@ async fn run_query_pipeline(
         routed_agent_ids: response_routed_agent_ids,
         rationale: decision.rationale.clone(),
         old_new_comparison: results.iter().find_map(|r| r.old_new_comparison.clone()),
+        chart_data: results.iter().find_map(|r| r.chart_data.clone()),
     })
 }
 
@@ -2288,6 +2346,7 @@ async fn main() -> anyhow::Result<()> {
     tool_registry.register(Arc::new(LawCompareTool::new(
         std::env::var("LAW_API_OC").unwrap_or_else(|_| "odaseul312".to_string()),
     )));
+    tool_registry.register(Arc::new(VisualizeTool));
 
     info!(tools = tool_registry.list_tools().len(), "Tool registry initialized");
 

@@ -15,7 +15,7 @@ use components::input::ChatInput;
 use components::sidebar::Sidebar;
 use types::{
     AgentMeta, AuthUser, BoardPostCompletion, ChatMessage, ChatMessageUi, ChatSession,
-    FavoriteQuestion, MessageRole, OldNewComparison, ProcessEvent, ProcessStep, ResponseVersion,
+    ChartData, FavoriteQuestion, MessageRole, OldNewComparison, ProcessEvent, ProcessStep, ResponseVersion,
     TokenUsage, BOARD_POST_ANALYZING_AGENT_ID, COMPLIANCE_AGENT_ID, OTHER_AGENT_ID,
 };
 
@@ -199,6 +199,7 @@ fn build_user_message(content: String, request_content: String) -> ChatMessage {
         timestamp: chrono::Utc::now(),
         suggestions: None,
         old_new_comparison: None,
+        chart_data: None,
         response_versions: vec![],
         current_response_index: 0,
         ui: None,
@@ -214,6 +215,7 @@ fn build_response_version(
     token_usage: Option<TokenUsage>,
     suggestions: Option<Vec<String>>,
     old_new_comparison: Option<OldNewComparison>,
+    chart_data: Option<ChartData>,
 ) -> ResponseVersion {
     ResponseVersion {
         content,
@@ -221,6 +223,7 @@ fn build_response_version(
         token_usage,
         suggestions,
         old_new_comparison,
+        chart_data,
     }
 }
 
@@ -235,6 +238,7 @@ fn build_assistant_message(version: ResponseVersion) -> ChatMessage {
         timestamp: chrono::Utc::now(),
         suggestions: version.suggestions.clone(),
         old_new_comparison: version.old_new_comparison.clone(),
+        chart_data: version.chart_data.clone(),
         response_versions: vec![version],
         current_response_index: 0,
         ui: None,
@@ -293,6 +297,7 @@ fn build_board_post_menu_message() -> ChatMessage {
         timestamp: chrono::Utc::now(),
         suggestions: None,
         old_new_comparison: None,
+        chart_data: None,
         response_versions: vec![],
         current_response_index: 0,
         ui: Some(ChatMessageUi::BoardPostMenu),
@@ -313,6 +318,7 @@ fn build_board_post_edit_menu_message() -> ChatMessage {
         timestamp: chrono::Utc::now(),
         suggestions: None,
         old_new_comparison: None,
+        chart_data: None,
         response_versions: vec![],
         current_response_index: 0,
         ui: Some(ChatMessageUi::BoardPostEditMenu),
@@ -333,6 +339,7 @@ fn build_board_post_delete_menu_message() -> ChatMessage {
         timestamp: chrono::Utc::now(),
         suggestions: None,
         old_new_comparison: None,
+        chart_data: None,
         response_versions: vec![],
         current_response_index: 0,
         ui: Some(ChatMessageUi::BoardPostDeleteMenu),
@@ -353,6 +360,7 @@ fn build_board_post_auth_required_message() -> ChatMessage {
         timestamp: chrono::Utc::now(),
         suggestions: None,
         old_new_comparison: None,
+        chart_data: None,
         response_versions: vec![],
         current_response_index: 0,
         ui: None,
@@ -378,6 +386,7 @@ fn build_pending_permit_work_type_prompt_message() -> ChatMessage {
                 .collect(),
         ),
         old_new_comparison: None,
+        chart_data: None,
         response_versions: vec![],
         current_response_index: 0,
         ui: None,
@@ -398,6 +407,7 @@ fn build_board_post_result_message(completion: BoardPostCompletion) -> ChatMessa
         timestamp: chrono::Utc::now(),
         suggestions: None,
         old_new_comparison: None,
+        chart_data: None,
         response_versions: vec![],
         current_response_index: 0,
         ui: None,
@@ -755,6 +765,7 @@ fn submit_query(
                         Some(resp.token_usage.clone()),
                         assistant_suggestions,
                         resp.old_new_comparison.clone(),
+                        resp.chart_data.clone(),
                     );
 
                     if let Some(target_id) = regenerate_target_id.as_deref() {
@@ -848,6 +859,7 @@ fn submit_query(
                         timestamp: chrono::Utc::now(),
                         suggestions: None,
                         old_new_comparison: None,
+                        chart_data: None,
                         response_versions: vec![],
                         current_response_index: 0,
                         ui: None,
@@ -1108,7 +1120,7 @@ fn app() -> Html {
                                 .unwrap_or(false);
                             if !already {
                                 let version =
-                                    build_response_version(answer.clone(), vec![], None, None, None);
+                                    build_response_version(answer.clone(), vec![], None, None, None, None);
                                 let assistant_msg = build_assistant_message(version);
                                 list[idx].messages.push(assistant_msg);
                             }

@@ -4,6 +4,7 @@ use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
 use crate::components::board_post::{BoardPostFlow, BoardPostMenuForm};
+use crate::components::chart::ChartBlock;
 use crate::markdown;
 use crate::types::{
     AgentMeta, BoardPostCompletion, BoardPostTarget, ChatMessage, ChatMessageUi, MessageRole,
@@ -477,6 +478,11 @@ pub fn message_bubble(props: &MessageProps) -> Html {
         .filter(|comparison| !comparison.article_comparisons.is_empty())
         .map(render_law_comparison)
         .unwrap_or_else(|| html! {});
+    // `visualize` 도구가 데이터를 반환했을 때만 차트 블록을 답변 아래에 렌더한다.
+    let chart_html = msg.chart_data.as_ref().map_or_else(
+        || html! {},
+        |data| html! { <ChartBlock message_id={msg.id.clone()} data={data.clone()} /> },
+    );
 
     html! {
         <div class={classes!("message-row", role_class, has_law_compare.then_some("has-law-compare"))}>
@@ -493,6 +499,7 @@ pub fn message_bubble(props: &MessageProps) -> Html {
                 } else {
                     { content_html }
                     { law_compare_html }
+                    { chart_html }
                 }
                 <div class="message-actions">
                     { copy_btn }
