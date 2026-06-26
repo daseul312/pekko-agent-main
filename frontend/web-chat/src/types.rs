@@ -317,6 +317,50 @@ pub struct ChatMessage {
     /// 사용자가 직접 에이전트를 고른 경우(direct)나 차단(blocked)에는 `None`.
     #[serde(default)]
     pub routing_note: Option<String>,
+    /// 이 답변을 생성한 에이전트 id(피드백 집계용). assistant 메시지에만 채워진다.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// 이 답변에 대한 내 피드백(👍/👎) 상태. 토글 하이라이트 표시용.
+    #[serde(default)]
+    pub feedback: Option<FeedbackRating>,
+}
+
+/// 답변 피드백 평가. 백엔드의 rating 문자열("up"/"down")과 대응한다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeedbackRating {
+    Up,
+    Down,
+}
+
+impl FeedbackRating {
+    /// 백엔드로 보낼 rating 문자열.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FeedbackRating::Up => "up",
+            FeedbackRating::Down => "down",
+        }
+    }
+}
+
+/// UI에서 상위(main)로 올리는 피드백 액션 페이로드.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeedbackSubmission {
+    /// 대상 assistant 메시지 id.
+    pub message_id: String,
+    /// 대상 답변 버전 인덱스(현재 표시 중인 버전).
+    pub response_index: i64,
+    /// 답변 에이전트 id(없으면 빈 문자열).
+    pub agent_id: String,
+    /// 답변 본문 앞부분 스냅샷(분석 맥락용).
+    pub content_excerpt: String,
+    /// 누른 평가.
+    pub rating: FeedbackRating,
+    /// 선택적 코멘트(주로 👎).
+    pub comment: Option<String>,
+    /// 부정 사유 태그(👎 다중 선택).
+    pub tags: Vec<String>,
+    /// true=평가 등록/변경, false=같은 평가 재클릭으로 토글 취소(삭제).
+    pub active: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -477,6 +521,9 @@ pub struct AuthUser {
     pub role: String,
     /// 프로필 이미지 URL(S3 전체 URL, 없으면 None).
     pub profile_image_url: Option<String>,
+    /// 피드백 통계(관리자 페이지) 열람 권한. 헤더의 관리자 버튼 노출 판정용.
+    #[serde(default)]
+    pub is_feedback_admin: bool,
 }
 
 /// `GET /api/sessions/:id/history` 응답의 단일 메시지(폴링으로 답변 이어받기용).
@@ -485,6 +532,9 @@ pub struct AuthUser {
 pub struct HistoryMessage {
     pub role: String,
     pub content: String,
+    /// 답변에 그래프가 있을 때만 채워지는 차트 JSON 문자열(읽기전용 대화 뷰어가 파싱해 렌더).
+    #[serde(default)]
+    pub chart_data: Option<String>,
 }
 
 /// `POST /api/share` 요청. 답변 본문을 공유 시점 스냅샷으로 전송한다.
@@ -504,6 +554,79 @@ pub struct ShareCreateRequest {
 #[derive(Clone, Debug, Deserialize)]
 pub struct ShareCreateResponse {
     pub share_url: String,
+}
+
+/// `GET /api/admin/feedback/stats` 응답. 회사+기간 단위 대시보드 집계.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct FeedbackStatsResponse {
+    pub total_up: i64,
+    pub total_down: i64,
+    pub comment_count: i64,
+    pub agents: Vec<AgentRate>,
+    pub tag_counts: Vec<TagCount>,
+    pub trend: Vec<TrendPoint>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct AgentRate {
+    pub agent_id: String,
+    pub up: i64,
+    pub down: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct TagCount {
+    pub tag: String,
+    pub count: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct TrendPoint {
+    pub month: String,
+    pub up: i64,
+    pub down: i64,
+}
+
+/// `GET /api/admin/feedback/comments` 응답(페이지네이션).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct FeedbackCommentsResponse {
+    pub items: Vec<CommentRow>,
+    pub total: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct CommentRow {
+    pub agent_id: String,
+    pub rating: String,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// 원본 대화 세션 id(빈 문자열이면 바로가기 불가).
+    #[serde(default)]
+    pub session_id: String,
+    pub created_at: String,
+}
+
+/// `POST /api/feedback` 요청. 답변 1개(특정 버전)에 대한 👍/👎 평가.
+#[derive(Clone, Debug, Serialize)]
+pub struct FeedbackRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<Uuid>,
+    pub message_id: String,
+    pub response_index: i64,
+    pub agent_id: String,
+    /// "up" | "down".
+    pub rating: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_excerpt: Option<String>,
+    /// 부정 사유 태그(👎 다중 선택).
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// false면 토글 취소(평가 삭제).
+    pub active: bool,
 }
 
 /// `GET /api/share/:id` 응답(공유된 답변 본문).
@@ -526,6 +649,17 @@ pub enum ShareFetchError {
     /// 404 — 없는 공유 링크.
     NotFound,
     /// 기타(네트워크/서버 오류 등). 사용자 표시용 메시지 포함.
+    Other(String),
+}
+
+/// 피드백 통계 조회 실패 종류(관리자 페이지가 상태별로 다른 안내를 띄우기 위함).
+#[derive(Clone, Debug, PartialEq)]
+pub enum FeedbackStatsError {
+    /// 401 — 미로그인.
+    Unauthorized,
+    /// 403 — 허용목록 외(관리자 아님).
+    Forbidden,
+    /// 기타(네트워크/서버 오류 등).
     Other(String),
 }
 
@@ -554,6 +688,8 @@ pub struct LoginResponse {
     pub expires_at: i64,
     #[serde(default)]
     pub profile_image_url: Option<String>,
+    #[serde(default)]
+    pub is_feedback_admin: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -15,7 +15,8 @@ use components::input::ChatInput;
 use components::sidebar::Sidebar;
 use types::{
     AgentMeta, AuthUser, BoardPostCompletion, ChatMessage, ChatMessageUi, ChatSession,
-    ChartData, FavoriteQuestion, MessageRole, OldNewComparison, ProcessEvent, ProcessStep, ResponseVersion,
+    ChartData, FavoriteQuestion, FeedbackRequest, FeedbackSubmission, MessageRole, OldNewComparison,
+    ProcessEvent, ProcessStep, ResponseVersion,
     TokenUsage, BOARD_POST_ANALYZING_AGENT_ID, COMPLIANCE_AGENT_ID, OTHER_AGENT_ID,
 };
 
@@ -206,6 +207,8 @@ fn build_user_message(content: String, request_content: String) -> ChatMessage {
         board_post_target: None,
         process_steps: Vec::new(),
         routing_note: None,
+        agent_id: None,
+        feedback: None,
     }
 }
 
@@ -245,6 +248,8 @@ fn build_assistant_message(version: ResponseVersion) -> ChatMessage {
         board_post_target: None,
         process_steps: Vec::new(),
         routing_note: None,
+        agent_id: None,
+        feedback: None,
     }
 }
 
@@ -304,6 +309,8 @@ fn build_board_post_menu_message() -> ChatMessage {
         board_post_target: None,
         process_steps: Vec::new(),
         routing_note: None,
+        agent_id: None,
+        feedback: None,
     }
 }
 
@@ -325,6 +332,8 @@ fn build_board_post_edit_menu_message() -> ChatMessage {
         board_post_target: None,
         process_steps: Vec::new(),
         routing_note: None,
+        agent_id: None,
+        feedback: None,
     }
 }
 
@@ -346,6 +355,8 @@ fn build_board_post_delete_menu_message() -> ChatMessage {
         board_post_target: None,
         process_steps: Vec::new(),
         routing_note: None,
+        agent_id: None,
+        feedback: None,
     }
 }
 
@@ -367,6 +378,8 @@ fn build_board_post_auth_required_message() -> ChatMessage {
         board_post_target: None,
         process_steps: Vec::new(),
         routing_note: None,
+        agent_id: None,
+        feedback: None,
     }
 }
 
@@ -393,6 +406,8 @@ fn build_pending_permit_work_type_prompt_message() -> ChatMessage {
         board_post_target: None,
         process_steps: Vec::new(),
         routing_note: None,
+        agent_id: None,
+        feedback: None,
     }
 }
 
@@ -414,6 +429,8 @@ fn build_board_post_result_message(completion: BoardPostCompletion) -> ChatMessa
         board_post_target: None,
         process_steps: Vec::new(),
         routing_note: None,
+        agent_id: None,
+        feedback: None,
     }
 }
 
@@ -777,12 +794,14 @@ fn submit_query(
                             let mut assistant_msg = build_assistant_message(response_version);
                             assistant_msg.process_steps = final_steps.clone();
                             assistant_msg.routing_note = routing_note;
+                            assistant_msg.agent_id = Some(resp.agent_id.clone());
                             msgs.push(assistant_msg);
                         }
                     } else {
                         let mut assistant_msg = build_assistant_message(response_version);
                         assistant_msg.process_steps = final_steps.clone();
                         assistant_msg.routing_note = routing_note;
+                        assistant_msg.agent_id = Some(resp.agent_id.clone());
                         msgs.push(assistant_msg);
                     }
                 }
@@ -866,6 +885,8 @@ fn submit_query(
                         board_post_target: None,
                         process_steps: Vec::new(),
                         routing_note: None,
+                        agent_id: None,
+                        feedback: None,
                     };
                     let mut msgs = current_msgs.clone();
                     msgs.push(err_msg);
@@ -1136,7 +1157,8 @@ fn app() -> Html {
                             if !already {
                                 let version =
                                     build_response_version(answer.clone(), vec![], None, None, None, None);
-                                let assistant_msg = build_assistant_message(version);
+                                let mut assistant_msg = build_assistant_message(version);
+                                assistant_msg.agent_id = Some(list[idx].agent_id.clone());
                                 list[idx].messages.push(assistant_msg);
                             }
                             let viewing = *current_sid_ref.borrow() == Some(pid);
@@ -1827,6 +1849,59 @@ fn app() -> Html {
         })
     };
 
+    // 답변 피드백(👍/👎). 낙관적으로 메시지의 feedback 상태를 갱신하고, 백엔드에 저장한다.
+    // 같은 평가 재클릭(active=false)은 토글 취소(삭제)로 보낸다.
+    let on_feedback = {
+        let messages = messages.clone();
+        let sessions = sessions.clone();
+        let session_id = session_id.clone();
+        Callback::from(move |submission: FeedbackSubmission| {
+            let new_state = if submission.active {
+                Some(submission.rating)
+            } else {
+                None
+            };
+
+            // 낙관적 UI 갱신: 대상 메시지의 feedback 상태를 즉시 반영.
+            let mut updated_messages = (*messages).clone();
+            if let Some(message) = updated_messages
+                .iter_mut()
+                .find(|m| m.id == submission.message_id)
+            {
+                message.feedback = new_state;
+            }
+            messages.set(updated_messages.clone());
+
+            if let Some(current_session_id) = *session_id {
+                let mut current_sessions = (*sessions).clone();
+                if let Some(idx) = current_sessions
+                    .iter()
+                    .position(|s| s.id == current_session_id)
+                {
+                    current_sessions[idx].messages = updated_messages;
+                    sessions.set(current_sessions);
+                }
+            }
+
+            let req = FeedbackRequest {
+                session_id: *session_id,
+                message_id: submission.message_id.clone(),
+                response_index: submission.response_index,
+                agent_id: submission.agent_id.clone(),
+                rating: submission.rating.as_str().to_string(),
+                comment: submission.comment.clone(),
+                content_excerpt: Some(submission.content_excerpt.clone()),
+                tags: submission.tags.clone(),
+                active: submission.active,
+            };
+            spawn_local(async move {
+                if let Err(e) = api::submit_feedback(&req).await {
+                    web_sys::console::error_1(&format!("피드백 전송 실패: {e}").into());
+                }
+            });
+        })
+    };
+
     let on_board_post_target_selected = { Callback::noop() };
 
     let on_board_post_complete = {
@@ -2061,6 +2136,7 @@ fn app() -> Html {
                     favorites={(*favorites).clone()}
                     on_favorite_ask={on_favorite_ask.clone()}
                     on_favorite_delete={on_favorite_delete.clone()}
+                    is_feedback_admin={auth_user.as_ref().map(|u| u.is_feedback_admin).unwrap_or(false)}
                 />
             { if *is_mobile_sidebar_open {
                 html! {
@@ -2104,6 +2180,7 @@ fn app() -> Html {
                         on_retry_with_agent={on_retry_with_agent.clone()}
                         on_edit_message={on_edit_message.clone()}
                         on_select_response_page={on_select_response_page.clone()}
+                        on_feedback={on_feedback.clone()}
                         on_board_post_target_selected={on_board_post_target_selected.clone()}
                         on_board_post_complete={on_board_post_complete.clone()}
                         on_example_click={on_example_click.clone()}
@@ -2138,6 +2215,7 @@ fn app() -> Html {
                         on_retry_with_agent={on_retry_with_agent.clone()}
                         on_edit_message={on_edit_message.clone()}
                         on_select_response_page={on_select_response_page.clone()}
+                        on_feedback={on_feedback.clone()}
                         on_board_post_target_selected={on_board_post_target_selected.clone()}
                         on_board_post_complete={on_board_post_complete.clone()}
                         on_example_click={on_example_click.clone()}
@@ -2572,12 +2650,44 @@ fn current_share_id() -> Option<String> {
     }
 }
 
+/// 현재 URL 해시가 `#/admin/feedback`면 true(피드백 통계 관리자 페이지 분기용).
+fn is_admin_feedback_route() -> bool {
+    web_sys::window()
+        .and_then(|w| w.location().hash().ok())
+        .map(|hash| {
+            let h = hash.trim_end_matches('/');
+            h == "#/admin/feedback"
+        })
+        .unwrap_or(false)
+}
+
+/// 현재 URL 해시가 `#/admin/session/{id}`면 그 session_id를 돌려준다(읽기전용 대화 뷰어 분기용).
+fn current_admin_session_id() -> Option<String> {
+    let window = web_sys::window()?;
+    let hash = window.location().hash().ok()?;
+    let rest = hash.strip_prefix("#/admin/session/")?;
+    let id = rest.trim_end_matches('/');
+    if id.is_empty() || id.contains('/') {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
 fn main() {
     wasm_logger::init(wasm_logger::Config::default());
-    // `/share/{id}` 경로면 전용 열람 페이지를, 그 외에는 기존 앱을 렌더한다(라우터 미사용).
+    // 해시 경로별 전용 페이지 분기(라우터 미사용, 순차 체크).
     if let Some(share_id) = current_share_id() {
+        // `/share/{id}` — 공유 답변 열람 페이지.
         let props = components::share_view::ShareViewProps { share_id };
         yew::Renderer::<components::share_view::ShareView>::with_props(props).render();
+    } else if let Some(session_id) = current_admin_session_id() {
+        // `/admin/session/{id}` — 읽기전용 대화 뷰어(피드백 바로가기 대상).
+        let props = components::session_view::SessionViewProps { session_id };
+        yew::Renderer::<components::session_view::SessionView>::with_props(props).render();
+    } else if is_admin_feedback_route() {
+        // `/admin/feedback` — 피드백 통계(관리자) 페이지.
+        yew::Renderer::<components::admin_feedback::AdminFeedback>::new().render();
     } else {
         yew::Renderer::<App>::new().render();
     }

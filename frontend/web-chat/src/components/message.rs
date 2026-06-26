@@ -8,8 +8,9 @@ use crate::components::board_post::{BoardPostFlow, BoardPostMenuForm};
 use crate::components::chart::ChartBlock;
 use crate::markdown;
 use crate::types::{
-    AgentMeta, BoardPostCompletion, BoardPostTarget, ChatMessage, ChatMessageUi, MessageRole,
-    OldNewArticleComparison, OldNewComparison, OldNewLawInfo, ProcessStep, StepStatus,
+    AgentMeta, BoardPostCompletion, BoardPostTarget, ChatMessage, ChatMessageUi, FeedbackRating,
+    FeedbackSubmission, MessageRole, OldNewArticleComparison, OldNewComparison, OldNewLawInfo,
+    ProcessStep, StepStatus,
 };
 
 #[wasm_bindgen]
@@ -21,6 +22,15 @@ extern "C" {
     #[wasm_bindgen(js_namespace = window, js_name = shareKakao)]
     fn share_kakao(url: &str, description: &str) -> bool;
 }
+
+/// 부정 피드백(👎) 사유 고정 5종. 백엔드 `FEEDBACK_TAGS`와 동일 순서/문자열이어야 한다.
+const FEEDBACK_REASON_TAGS: [&str; 5] = [
+    "출처/근거 불명확",
+    "내용 부정확",
+    "답변이 너무 길다",
+    "최신 정보 미반영",
+    "기타",
+];
 
 /// 공유 모달의 세 가지 액션.
 #[derive(Clone, Copy)]
@@ -58,6 +68,8 @@ pub struct MessageProps {
     /// "질문 수정": (user 메시지 id, 수정된 질문 내용).
     pub on_edit_message: Callback<(String, String)>,
     pub on_select_response_page: Callback<(String, usize)>,
+    /// 답변 피드백(👍/👎) 제출.
+    pub on_feedback: Callback<FeedbackSubmission>,
     pub on_board_post_target_selected: Callback<BoardPostTarget>,
     pub on_board_post_complete: Callback<BoardPostCompletion>,
     /// 사용자 질문 ⭐ 토글: 질문 내용을 전달(에이전트 id는 상위에서 결합).
@@ -95,6 +107,10 @@ pub fn message_bubble(props: &MessageProps) -> Html {
     // 이메일 하위 메뉴(서비스 선택) 펼침 여부 + 안내 문구(예: 네이버 복사 안내).
     let email_submenu_open = use_state(|| false);
     let share_notice = use_state(|| Option::<String>::None);
+    // 👎 클릭 시 펼쳐지는 코멘트 입력창 상태 + 입력값 + 선택된 사유 태그(다중).
+    let feedback_comment_open = use_state(|| false);
+    let feedback_comment_value = use_state(String::new);
+    let feedback_tags = use_state(Vec::<String>::new);
     let is_user = matches!(msg.role, MessageRole::User);
     let is_assistant = matches!(msg.role, MessageRole::Assistant);
     let board_post_route_flow = board_post_route_flow(&msg.content);
@@ -420,6 +436,202 @@ pub fn message_bubble(props: &MessageProps) -> Html {
         }
     } else {
         html! {}
+    };
+
+    // 답변 피드백(👍/👎). 로그인 사용자에게만 노출(공유 버튼과 동일 게이트).
+    // 버튼은 다른 액션 버튼과 같은 줄(message-actions)에 통합되고, 👎 선택 시 코멘트창이
+    // 액션 줄 아래에 펼쳐진다. 👍는 즉시 제출, 같은 평가 재클릭은 취소(토글).
+    // 평가는 현재 표시 중인 버전(current_response_page)에 귀속된다.
+    let show_feedback = is_assistant && msg.ui.is_none() && props.is_authenticated;
+    let (feedback_buttons_html, feedback_comment_html) = if show_feedback {
+        let message_id = msg.id.clone();
+        let agent_id = msg.agent_id.clone().unwrap_or_default();
+        let response_index = msg.current_response_page() as i64;
+        let excerpt: String = msg.content.chars().take(500).collect();
+        let current = msg.feedback;
+
+        // 👍: 즉시 제출(이미 👍면 취소).
+        let on_up = {
+            let on_feedback = props.on_feedback.clone();
+            let message_id = message_id.clone();
+            let agent_id = agent_id.clone();
+            let excerpt = excerpt.clone();
+            let feedback_comment_open = feedback_comment_open.clone();
+            Callback::from(move |_: MouseEvent| {
+                feedback_comment_open.set(false);
+                let active = current != Some(FeedbackRating::Up);
+                on_feedback.emit(FeedbackSubmission {
+                    message_id: message_id.clone(),
+                    response_index,
+                    agent_id: agent_id.clone(),
+                    content_excerpt: excerpt.clone(),
+                    rating: FeedbackRating::Up,
+                    comment: None,
+                    tags: Vec::new(),
+                    active,
+                });
+            })
+        };
+
+        // 👎: 이미 👎면 취소, 아니면 사유/코멘트 입력창 토글(제출/건너뛰기 버튼으로 확정).
+        let on_down = {
+            let on_feedback = props.on_feedback.clone();
+            let message_id = message_id.clone();
+            let agent_id = agent_id.clone();
+            let excerpt = excerpt.clone();
+            let feedback_comment_open = feedback_comment_open.clone();
+            let feedback_comment_value = feedback_comment_value.clone();
+            let feedback_tags = feedback_tags.clone();
+            Callback::from(move |_: MouseEvent| {
+                if current == Some(FeedbackRating::Down) {
+                    feedback_comment_open.set(false);
+                    on_feedback.emit(FeedbackSubmission {
+                        message_id: message_id.clone(),
+                        response_index,
+                        agent_id: agent_id.clone(),
+                        content_excerpt: excerpt.clone(),
+                        rating: FeedbackRating::Down,
+                        comment: None,
+                        tags: Vec::new(),
+                        active: false,
+                    });
+                } else {
+                    let open = !*feedback_comment_open;
+                    feedback_comment_open.set(open);
+                    if open {
+                        feedback_comment_value.set(String::new());
+                        feedback_tags.set(Vec::new());
+                    }
+                }
+            })
+        };
+
+        let up_active = current == Some(FeedbackRating::Up);
+        let down_active = current == Some(FeedbackRating::Down);
+        let buttons = html! {
+            <div class="feedback-inline">
+                <span class="feedback-label">{ "이 답변 어땠나요?" }</span>
+                <button
+                    class={classes!("feedback-btn", "feedback-up", up_active.then_some("active"))}
+                    onclick={on_up}
+                    title="도움이 됐어요"
+                >{ "👍" }</button>
+                <button
+                    class={classes!("feedback-btn", "feedback-down", down_active.then_some("active"))}
+                    onclick={on_down}
+                    title="아쉬웠어요"
+                >{ "👎" }</button>
+            </div>
+        };
+
+        let comment = if *feedback_comment_open {
+            // 사유 칩(다중 선택 토글).
+            let chips = FEEDBACK_REASON_TAGS
+                .iter()
+                .map(|tag| {
+                    let tag = (*tag).to_string();
+                    let selected = feedback_tags.contains(&tag);
+                    let on_toggle = {
+                        let feedback_tags = feedback_tags.clone();
+                        let tag = tag.clone();
+                        Callback::from(move |_: MouseEvent| {
+                            let mut next = (*feedback_tags).clone();
+                            if let Some(pos) = next.iter().position(|t| t == &tag) {
+                                next.remove(pos);
+                            } else {
+                                next.push(tag.clone());
+                            }
+                            feedback_tags.set(next);
+                        })
+                    };
+                    html! {
+                        <button
+                            type="button"
+                            class={classes!("feedback-tag-chip", selected.then_some("active"))}
+                            onclick={on_toggle}
+                        >{ tag }</button>
+                    }
+                })
+                .collect::<Html>();
+
+            let on_input = {
+                let feedback_comment_value = feedback_comment_value.clone();
+                Callback::from(move |e: InputEvent| {
+                    if let Some(target) = e.target() {
+                        if let Ok(textarea) = target.dyn_into::<web_sys::HtmlTextAreaElement>() {
+                            feedback_comment_value.set(textarea.value());
+                        }
+                    }
+                })
+            };
+            let on_submit = {
+                let on_feedback = props.on_feedback.clone();
+                let message_id = message_id.clone();
+                let agent_id = agent_id.clone();
+                let excerpt = excerpt.clone();
+                let feedback_comment_open = feedback_comment_open.clone();
+                let feedback_comment_value = feedback_comment_value.clone();
+                let feedback_tags = feedback_tags.clone();
+                Callback::from(move |_: MouseEvent| {
+                    let comment = (*feedback_comment_value).trim().to_string();
+                    let comment = if comment.is_empty() { None } else { Some(comment) };
+                    let tags = (*feedback_tags).clone();
+                    feedback_comment_open.set(false);
+                    on_feedback.emit(FeedbackSubmission {
+                        message_id: message_id.clone(),
+                        response_index,
+                        agent_id: agent_id.clone(),
+                        content_excerpt: excerpt.clone(),
+                        rating: FeedbackRating::Down,
+                        comment,
+                        tags,
+                        active: true,
+                    });
+                })
+            };
+            // 건너뛰기: 사유·코멘트 없이 👎만 기록(평가가 항상 집계되도록).
+            let on_skip = {
+                let on_feedback = props.on_feedback.clone();
+                let message_id = message_id.clone();
+                let agent_id = agent_id.clone();
+                let excerpt = excerpt.clone();
+                let feedback_comment_open = feedback_comment_open.clone();
+                Callback::from(move |_: MouseEvent| {
+                    feedback_comment_open.set(false);
+                    on_feedback.emit(FeedbackSubmission {
+                        message_id: message_id.clone(),
+                        response_index,
+                        agent_id: agent_id.clone(),
+                        content_excerpt: excerpt.clone(),
+                        rating: FeedbackRating::Down,
+                        comment: None,
+                        tags: Vec::new(),
+                        active: true,
+                    });
+                })
+            };
+            html! {
+                <div class="feedback-comment-box">
+                    <div class="feedback-tag-chips">{ chips }</div>
+                    <textarea
+                        class="feedback-comment-input"
+                        placeholder="어떤 점이 아쉬웠나요? (선택)"
+                        value={(*feedback_comment_value).clone()}
+                        oninput={on_input}
+                    />
+                    <div class="feedback-comment-actions">
+                        <button class="feedback-comment-submit" onclick={on_submit}>{ "제출" }</button>
+                        <button class="feedback-comment-cancel" onclick={on_skip}>{ "건너뛰기" }</button>
+                    </div>
+                </div>
+            }
+        } else {
+            html! {}
+        };
+
+        (buttons, comment)
+    } else {
+        (html! {}, html! {})
     };
 
     // "다른 에이전트로 재시도" 드롭다운: 같은 질문을 사용자가 고른 에이전트로
@@ -783,7 +995,9 @@ pub fn message_bubble(props: &MessageProps) -> Html {
                     { regenerate_btn }
                     { retry_agent_btn }
                     { download_btn }
+                    { feedback_buttons_html }
                 </div>
+                { feedback_comment_html }
                 if show_meta {
                     <div class="message-meta">
                         { pagination_html }

@@ -581,6 +581,32 @@
       .logout-btn:hover svg {
         transform: translateX(2px);
       }
+      /* 헤더 관리자(피드백 통계) 이동 버튼 — 로그아웃 버튼과 같은 톤, accent 강조. */
+      .admin-link-btn {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 14px;
+        border-radius: 10px;
+        background: var(--bg);
+        border: 1.5px solid var(--border);
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+      .admin-link-btn:hover {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: var(--accent);
+        transform: translateY(-1px);
+      }
+      .admin-link-btn svg {
+        flex-shrink: 0;
+      }
       .chat-header-summary {
         font-size: 12px;
         color: var(--muted);
@@ -2522,13 +2548,15 @@
 
       .message-actions {
         display: flex;
+        flex-wrap: wrap;
         gap: 8px;
         margin-top: 6px;
       }
       .copy-btn,
       .edit-btn,
       .share-btn,
-      .regenerate-btn {
+      .regenerate-btn,
+      .feedback-btn {
         font-size: 12px;
         padding: 5px 10px;
         border-radius: var(--radius-sm);
@@ -2539,12 +2567,15 @@
         display: flex;
         align-items: center;
         gap: 4px;
+        white-space: nowrap;
+        flex-shrink: 0;
         transition: all 0.15s ease;
       }
       .copy-btn:hover,
       .edit-btn:hover,
       .share-btn:hover,
-      .regenerate-btn:hover {
+      .regenerate-btn:hover,
+      .feedback-btn:hover {
         background: var(--accent-soft);
         border-color: var(--accent);
         color: var(--accent);
@@ -2553,17 +2584,103 @@
       .copy-btn:disabled,
       .edit-btn:disabled,
       .share-btn:disabled,
-      .regenerate-btn:disabled {
+      .regenerate-btn:disabled,
+      .feedback-btn:disabled {
         opacity: 0.45;
         cursor: not-allowed;
       }
       .copy-btn:disabled:hover,
       .edit-btn:disabled:hover,
       .share-btn:disabled:hover,
-      .regenerate-btn:disabled:hover {
+      .regenerate-btn:disabled:hover,
+      .feedback-btn:disabled:hover {
         background: transparent;
         border-color: var(--border);
         color: var(--muted);
+      }
+
+      /* ── 답변 피드백(👍/👎) ── */
+      /* 버튼 기본형은 위의 .copy-btn 그룹과 공유한다. 여기서는 묶음 배치/선택 강조/코멘트창만 정의. */
+      /* 액션 버튼(왼쪽)과 시각적으로 분리: 남는 공간을 밀어 오른쪽 끝에 묶음 배치. */
+      .feedback-inline {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .feedback-label {
+        font-size: 12px;
+        color: var(--muted);
+        margin-right: 2px;
+      }
+      .feedback-btn {
+        font-size: 14px;
+        line-height: 1;
+        padding: 5px 9px;
+      }
+      .feedback-btn.active {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .feedback-btn.feedback-down.active {
+        background: rgba(220, 80, 80, 0.12);
+        border-color: rgba(220, 80, 80, 0.7);
+        color: rgb(200, 60, 60);
+      }
+      .feedback-comment-box {
+        margin-top: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-width: 440px;
+      }
+      .feedback-comment-input {
+        font-size: 13px;
+        font-family: inherit;
+        padding: 9px 11px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: var(--chat-bg);
+        color: var(--text);
+        resize: vertical;
+        min-height: 52px;
+      }
+      .feedback-comment-input:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+      .feedback-comment-actions {
+        display: flex;
+        gap: 8px;
+      }
+      .feedback-comment-submit {
+        font-size: 12px;
+        padding: 6px 16px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: #fff;
+        cursor: pointer;
+        transition: opacity 0.15s ease;
+      }
+      .feedback-comment-submit:hover {
+        opacity: 0.85;
+      }
+      .feedback-comment-cancel {
+        font-size: 12px;
+        padding: 6px 14px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .feedback-comment-cancel:hover {
+        border-color: var(--accent);
+        color: var(--accent);
       }
 
       /* ── 답변 공유 모달 ── */
@@ -2754,6 +2871,389 @@
         background: var(--accent);
         color: #fff;
       }
+
+      /* ── 피드백 통계(관리자) 페이지 ── */
+      .admin-fb-root {
+        position: fixed;
+        inset: 0;
+        overflow-y: auto;
+        background: var(--app-bg, #f8fafc);
+        display: flex;
+        flex-direction: column;
+      }
+      .admin-fb-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 16px 24px;
+        border-bottom: 1px solid var(--border);
+        background: var(--chat-bg);
+      }
+      .admin-fb-back {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px;
+        height: 30px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .admin-fb-back:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .admin-fb-logo {
+        font-size: 18px;
+        font-weight: 800;
+        color: var(--accent);
+      }
+      .admin-fb-subtitle {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .admin-fb-main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 28px 16px;
+        gap: 20px;
+      }
+      .admin-fb-status {
+        margin-top: 80px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 15px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+      }
+      .admin-fb-status .modal-btn {
+        flex: none;
+        min-width: 140px;
+        background: var(--accent);
+        color: #fff;
+      }
+      .admin-fb-summary {
+        width: 100%;
+        max-width: 860px;
+        display: flex;
+        gap: 16px;
+      }
+      .admin-fb-summary-item {
+        flex: 1;
+        background: var(--chat-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 18px 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        align-items: center;
+      }
+      .admin-fb-summary-num {
+        font-size: 28px;
+        font-weight: 800;
+        color: var(--text);
+      }
+      .admin-fb-summary-label {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .admin-fb-list {
+        width: 100%;
+        max-width: 860px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      .admin-fb-card {
+        background: var(--chat-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 18px 20px;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.04);
+      }
+      .admin-fb-card-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+      .admin-fb-agent-name {
+        font-size: 15px;
+        font-weight: 700;
+        color: var(--text);
+      }
+      .admin-fb-counts {
+        display: flex;
+        gap: 12px;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .admin-fb-up {
+        color: #16a34a;
+      }
+      .admin-fb-down {
+        color: #dc4f4f;
+      }
+      .admin-fb-bar {
+        display: flex;
+        height: 8px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: var(--border);
+      }
+      .admin-fb-bar-up {
+        background: #16a34a;
+      }
+      .admin-fb-bar-down {
+        background: #dc4f4f;
+      }
+      .admin-fb-empty-comments {
+        margin-top: 10px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .admin-fb-comments {
+        margin-top: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .admin-fb-comment {
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 8px 10px;
+        background: var(--app-bg, #f8fafc);
+      }
+      .admin-fb-comment.down {
+        border-left-color: #dc4f4f;
+      }
+      .admin-fb-comment-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 4px;
+      }
+      .admin-fb-comment-icon {
+        font-size: 13px;
+      }
+      .admin-fb-comment-date {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .admin-fb-comment-text {
+        font-size: 13px;
+        color: var(--text);
+        white-space: pre-wrap;
+      }
+      .admin-fb-goto {
+        margin-top: 8px;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 5px 12px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--accent);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .admin-fb-goto:hover {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+      }
+      /* 읽기전용 대화 뷰어(피드백 바로가기 대상) */
+      .session-view-chat {
+        width: 100%;
+        max-width: 860px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        background: var(--chat-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 24px;
+      }
+
+      /* ── 피드백 통계 대시보드 ── */
+      .admin-fb-main { max-width: 920px; margin: 0 auto; width: 100%; }
+      .fb-period-bar { display: flex; gap: 8px; width: 100%; }
+      .fb-period-chip {
+        font-size: 13px;
+        padding: 7px 16px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--chat-bg);
+        color: var(--muted);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .fb-period-chip:hover { border-color: var(--accent); color: var(--accent); }
+      .fb-period-chip.active {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+        font-weight: 600;
+      }
+      .fb-kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 14px;
+        width: 100%;
+      }
+      .fb-kpi-card {
+        background: var(--chat-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+      }
+      .fb-kpi-num { font-size: 30px; font-weight: 800; color: var(--text); }
+      .fb-kpi-label { font-size: 13px; color: var(--muted); }
+      .fb-two-col {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        width: 100%;
+      }
+      .fb-section {
+        background: var(--chat-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 18px 20px;
+        width: 100%;
+      }
+      .fb-section-title {
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--text);
+        margin: 0 0 14px;
+      }
+      .fb-empty { font-size: 13px; color: var(--muted); padding: 12px 0; text-align: center; }
+      /* 에이전트별 긍정률 */
+      .fb-agent-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+      .fb-agent-row:last-child { border-bottom: none; }
+      .fb-agent-row-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+      .fb-agent-name { font-size: 14px; font-weight: 600; color: var(--text); }
+      .fb-agent-meta { display: flex; align-items: center; gap: 8px; }
+      .fb-agent-rate { font-size: 13px; font-weight: 700; color: var(--text); }
+      .fb-badge { font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 999px; }
+      .fb-badge-good { background: rgba(22,163,74,0.14); color: #16a34a; }
+      .fb-badge-mid { background: rgba(224,150,40,0.16); color: #d98018; }
+      .fb-badge-bad { background: rgba(220,80,80,0.14); color: #dc4f4f; }
+      .fb-badge-none { background: var(--border); color: var(--muted); }
+      .fb-rate-track { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; }
+      .fb-rate-fill { height: 100%; background: #16a34a; }
+      .fb-agent-counts { font-size: 12px; color: var(--muted); margin-top: 5px; }
+      /* 부정 사유 칩 */
+      .fb-tag-chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+      .fb-tag-chip {
+        font-size: 12px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--muted);
+      }
+      .fb-tag-chip.sm { font-size: 11px; padding: 2px 8px; }
+      /* 코멘트 테이블 */
+      .fb-comments-table { display: flex; flex-direction: column; }
+      .fb-comment-row {
+        display: grid;
+        grid-template-columns: 130px 1fr auto;
+        gap: 14px;
+        padding: 12px 0;
+        border-bottom: 1px solid var(--border);
+        align-items: start;
+      }
+      .fb-comment-row:last-child { border-bottom: none; }
+      .fb-comment-agent { font-size: 13px; font-weight: 600; color: var(--text); }
+      .fb-comment-text { font-size: 13px; color: var(--text); white-space: pre-wrap; }
+      .fb-row-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+      .fb-comment-aside { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+      .fb-comment-date { font-size: 11px; color: var(--muted); white-space: nowrap; }
+      .fb-goto-btn {
+        font-size: 11px;
+        font-weight: 600;
+        padding: 4px 10px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--accent);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .fb-goto-btn:hover { background: var(--accent-soft); border-color: var(--accent); }
+      .fb-more-btn {
+        margin-top: 14px;
+        width: 100%;
+        font-size: 13px;
+        padding: 9px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .fb-more-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+      .fb-more-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+      @media (max-width: 760px) {
+        .fb-kpi-grid { grid-template-columns: repeat(2, 1fr); }
+        .fb-two-col { grid-template-columns: 1fr; }
+        .fb-comment-row { grid-template-columns: 1fr; }
+      }
+
+      /* 👎 부정 사유 수집 칩(채팅 화면) */
+      .feedback-tag-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+      .feedback-tag-chip {
+        font-size: 12px;
+        padding: 5px 11px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--chat-bg);
+        color: var(--muted);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .feedback-tag-chip:hover { border-color: var(--accent); }
+      .feedback-tag-chip.active {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: var(--accent);
+        font-weight: 600;
+      }
+
+      /* 사이드바 피드백 통계 진입 버튼 */
+      .sidebar-feedback-stats {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 4px 8px;
+        padding: 9px 12px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .sidebar-feedback-stats:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+
       /* ── 질문 인라인 수정 에디터 ── */
       /* 사용자 메시지 액션(수정 버튼)은 우측 정렬 버블에 맞춰 오른쪽으로 */
       .message-row.user .message-actions {

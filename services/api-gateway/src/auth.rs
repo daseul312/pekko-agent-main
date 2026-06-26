@@ -75,6 +75,9 @@ pub struct LoginResponse {
     pub expires_at: i64,
     /// 프로필 이미지 S3 URL(없으면 null).
     pub profile_image_url: Option<String>,
+    /// 이 사용자가 피드백 통계(관리자 페이지)를 볼 수 있는지(`FEEDBACK_ADMIN_IDS` 허용목록).
+    /// 프론트가 헤더의 관리자 버튼 노출 여부를 판단하는 데 쓴다.
+    pub is_feedback_admin: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -226,6 +229,7 @@ pub async fn login_handler(
     .map_err(|e| internal(format!("토큰 생성 실패: {e}")))?;
 
     let jar = jar.add(build_session_cookie(token));
+    let is_feedback_admin = crate::is_feedback_admin(&row.employee_id);
     Ok((
         jar,
         Json(LoginResponse {
@@ -235,6 +239,7 @@ pub async fn login_handler(
             role,
             expires_at,
             profile_image_url,
+            is_feedback_admin,
         }),
     ))
 }
@@ -268,6 +273,7 @@ pub async fn me_handler(
         }
     };
 
+    let is_feedback_admin = crate::is_feedback_admin(&id.employee_id);
     Ok(Json(LoginResponse {
         employee_id: id.employee_id,
         employee_name: id.name,
@@ -275,6 +281,7 @@ pub async fn me_handler(
         role: id.role,
         expires_at: id.exp,
         profile_image_url,
+        is_feedback_admin,
     }))
 }
 

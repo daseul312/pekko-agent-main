@@ -1,3 +1,4 @@
+pub mod admin_feedback;
 pub mod agent_selector;
 pub mod board_post;
 pub mod chart;
@@ -5,6 +6,7 @@ pub mod chat;
 pub mod header;
 pub mod input;
 pub mod message;
+pub mod session_view;
 pub mod share_view;
 pub mod sidebar;
 pub mod suggestions;

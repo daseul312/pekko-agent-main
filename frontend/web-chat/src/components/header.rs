@@ -30,6 +30,28 @@ pub fn chat_header(props: &HeaderProps) -> Html {
                 </span>
             },
         };
+        // 피드백 통계 관리자만 보이는 전용 이동 버튼. 해시 라우팅은 main()에서만 분기되므로
+        // 해시를 바꾼 뒤 reload해 전용 페이지(AdminFeedback)로 진입한다.
+        let admin_btn = if user.is_feedback_admin {
+            html! {
+                <button class="admin-link-btn" title="답변 피드백 통계" onclick={move |_| {
+                    if let Some(w) = web_sys::window() {
+                        let loc = w.location();
+                        let _ = loc.set_hash("#/admin/feedback");
+                        let _ = loc.reload();
+                    }
+                }}>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="20" x2="18" y2="10"></line>
+                        <line x1="12" y1="20" x2="12" y2="4"></line>
+                        <line x1="6" y1="20" x2="6" y2="14"></line>
+                    </svg>
+                    <span>{ "피드백 통계" }</span>
+                </button>
+            }
+        } else {
+            html! {}
+        };
         html! {
             <div class="header-auth-info">
                 { avatar }
@@ -37,6 +59,7 @@ pub fn chat_header(props: &HeaderProps) -> Html {
                     <strong>{ &user.name }</strong>
                     { " 님" }
                 </span>
+                { admin_btn }
                 <button class="logout-btn" onclick={let on_logout = props.on_logout.clone(); move |_| on_logout.emit(())}>
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>

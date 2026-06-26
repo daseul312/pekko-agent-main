@@ -6,8 +6,8 @@
     <title>Core Agentic AI — EHS AI 채팅</title>
     
 <script type="module">
-import init, * as bindings from '/pekko-agent-web-chat-a50f3778b76d12da.js';
-const wasm = await init({ module_or_path: '/pekko-agent-web-chat-a50f3778b76d12da_bg.wasm' });
+import init, * as bindings from '/pekko-agent-web-chat-2c86b8886086e9bd.js';
+const wasm = await init({ module_or_path: '/pekko-agent-web-chat-2c86b8886086e9bd_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -591,6 +591,32 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
       }
       .logout-btn:hover svg {
         transform: translateX(2px);
+      }
+      /* 헤더 관리자(피드백 통계) 이동 버튼 — 로그아웃 버튼과 같은 톤, accent 강조. */
+      .admin-link-btn {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 14px;
+        border-radius: 10px;
+        background: var(--bg);
+        border: 1.5px solid var(--border);
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+      .admin-link-btn:hover {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: var(--accent);
+        transform: translateY(-1px);
+      }
+      .admin-link-btn svg {
+        flex-shrink: 0;
       }
       .chat-header-summary {
         font-size: 12px;
@@ -2533,12 +2559,15 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
       .message-actions {
         display: flex;
+        flex-wrap: wrap;
         gap: 8px;
         margin-top: 6px;
       }
       .copy-btn,
       .edit-btn,
-      .regenerate-btn {
+      .share-btn,
+      .regenerate-btn,
+      .feedback-btn {
         font-size: 12px;
         padding: 5px 10px;
         border-radius: var(--radius-sm);
@@ -2549,11 +2578,15 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         display: flex;
         align-items: center;
         gap: 4px;
+        white-space: nowrap;
+        flex-shrink: 0;
         transition: all 0.15s ease;
       }
       .copy-btn:hover,
       .edit-btn:hover,
-      .regenerate-btn:hover {
+      .share-btn:hover,
+      .regenerate-btn:hover,
+      .feedback-btn:hover {
         background: var(--accent-soft);
         border-color: var(--accent);
         color: var(--accent);
@@ -2561,17 +2594,677 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
       .copy-btn:disabled,
       .edit-btn:disabled,
-      .regenerate-btn:disabled {
+      .share-btn:disabled,
+      .regenerate-btn:disabled,
+      .feedback-btn:disabled {
         opacity: 0.45;
         cursor: not-allowed;
       }
       .copy-btn:disabled:hover,
       .edit-btn:disabled:hover,
-      .regenerate-btn:disabled:hover {
+      .share-btn:disabled:hover,
+      .regenerate-btn:disabled:hover,
+      .feedback-btn:disabled:hover {
         background: transparent;
         border-color: var(--border);
         color: var(--muted);
       }
+
+      /* ── 답변 피드백(👍/👎) ── */
+      /* 버튼 기본형은 위의 .copy-btn 그룹과 공유한다. 여기서는 묶음 배치/선택 강조/코멘트창만 정의. */
+      /* 액션 버튼(왼쪽)과 시각적으로 분리: 남는 공간을 밀어 오른쪽 끝에 묶음 배치. */
+      .feedback-inline {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .feedback-label {
+        font-size: 12px;
+        color: var(--muted);
+        margin-right: 2px;
+      }
+      .feedback-btn {
+        font-size: 14px;
+        line-height: 1;
+        padding: 5px 9px;
+      }
+      .feedback-btn.active {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .feedback-btn.feedback-down.active {
+        background: rgba(220, 80, 80, 0.12);
+        border-color: rgba(220, 80, 80, 0.7);
+        color: rgb(200, 60, 60);
+      }
+      .feedback-comment-box {
+        margin-top: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-width: 440px;
+      }
+      .feedback-comment-input {
+        font-size: 13px;
+        font-family: inherit;
+        padding: 9px 11px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: var(--chat-bg);
+        color: var(--text);
+        resize: vertical;
+        min-height: 52px;
+      }
+      .feedback-comment-input:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+      .feedback-comment-actions {
+        display: flex;
+        gap: 8px;
+      }
+      .feedback-comment-submit {
+        font-size: 12px;
+        padding: 6px 16px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: #fff;
+        cursor: pointer;
+        transition: opacity 0.15s ease;
+      }
+      .feedback-comment-submit:hover {
+        opacity: 0.85;
+      }
+      .feedback-comment-cancel {
+        font-size: 12px;
+        padding: 6px 14px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .feedback-comment-cancel:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      /* ── 답변 공유 모달 ── */
+      .share-modal {
+        background: var(--chat-bg);
+        border: 1.5px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 28px;
+        width: 100%;
+        max-width: 360px;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.15);
+        animation: modalUp 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+      }
+      .share-modal h3 {
+        font-size: 18px;
+        color: inherit;
+        margin: 0 0 18px;
+        font-weight: 700;
+        text-align: center;
+      }
+      .dark .share-modal h3 {
+        color: #f8fafc;
+      }
+      .share-options {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        margin-bottom: 16px;
+      }
+      .share-option {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 12px 14px;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        background: transparent;
+        color: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        text-align: left;
+        transition: all 0.15s ease;
+      }
+      .share-option:hover {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .share-option:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .share-option-caret {
+        font-size: 11px;
+        opacity: 0.6;
+      }
+      /* 이메일 서비스 선택 하위 메뉴(앱 선택 시트 형태) */
+      .share-suboptions {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 4px 4px 4px 12px;
+        margin: -2px 0 2px;
+        border-left: 2px solid var(--accent-soft);
+      }
+      .share-suboption {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        background: transparent;
+        color: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        text-align: left;
+        transition: all 0.15s ease;
+      }
+      .share-suboption:hover {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .share-suboption:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      /* 메일 서비스 아이콘 */
+      .mail-ico-svg {
+        width: 18px;
+        height: 18px;
+        flex: none;
+      }
+      .mail-ico-muted {
+        opacity: 0.6;
+      }
+      .mail-ico {
+        width: 18px;
+        height: 18px;
+        flex: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: 800;
+        color: #fff;
+      }
+      .mail-ico-naver {
+        background: #03c75a;
+      }
+      .mail-ico-outlook {
+        background: #0078d4;
+      }
+      .share-status {
+        font-size: 13px;
+        color: var(--muted);
+        text-align: center;
+        margin-bottom: 12px;
+      }
+      .share-error {
+        font-size: 13px;
+        color: var(--danger);
+        text-align: center;
+        margin-bottom: 12px;
+      }
+
+      /* ── 공유 링크 열람 페이지 ── */
+      /* body가 `display:flex; overflow:hidden`이라, 전체 화면을 차지하고 자체 스크롤을
+         갖도록 fixed로 띄운다(좌측에 갇히거나 아래가 잘리는 문제 방지). */
+      .share-view-root {
+        position: fixed;
+        inset: 0;
+        overflow-y: auto;
+        background: var(--app-bg, #f8fafc);
+        display: flex;
+        flex-direction: column;
+      }
+      .share-view-header {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        padding: 18px 24px;
+        border-bottom: 1px solid var(--border);
+        background: var(--chat-bg);
+      }
+      .share-view-logo {
+        font-size: 18px;
+        font-weight: 800;
+        color: var(--accent);
+      }
+      .share-view-subtitle {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .share-view-main {
+        flex: 1;
+        display: flex;
+        justify-content: center;
+        padding: 32px 16px;
+      }
+      .share-view-card {
+        width: 100%;
+        max-width: 760px;
+        background: var(--chat-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 28px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+      }
+      .share-view-status {
+        margin-top: 80px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 15px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+      }
+      .share-view-status .modal-btn {
+        flex: none;
+        min-width: 140px;
+        background: var(--accent);
+        color: #fff;
+      }
+
+      /* ── 피드백 통계(관리자) 페이지 ── */
+      .admin-fb-root {
+        position: fixed;
+        inset: 0;
+        overflow-y: auto;
+        background: var(--app-bg, #f8fafc);
+        display: flex;
+        flex-direction: column;
+      }
+      .admin-fb-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 16px 24px;
+        border-bottom: 1px solid var(--border);
+        background: var(--chat-bg);
+      }
+      .admin-fb-back {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px;
+        height: 30px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .admin-fb-back:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .admin-fb-logo {
+        font-size: 18px;
+        font-weight: 800;
+        color: var(--accent);
+      }
+      .admin-fb-subtitle {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .admin-fb-main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 28px 16px;
+        gap: 20px;
+      }
+      .admin-fb-status {
+        margin-top: 80px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 15px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+      }
+      .admin-fb-status .modal-btn {
+        flex: none;
+        min-width: 140px;
+        background: var(--accent);
+        color: #fff;
+      }
+      .admin-fb-summary {
+        width: 100%;
+        max-width: 860px;
+        display: flex;
+        gap: 16px;
+      }
+      .admin-fb-summary-item {
+        flex: 1;
+        background: var(--chat-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 18px 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        align-items: center;
+      }
+      .admin-fb-summary-num {
+        font-size: 28px;
+        font-weight: 800;
+        color: var(--text);
+      }
+      .admin-fb-summary-label {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .admin-fb-list {
+        width: 100%;
+        max-width: 860px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      .admin-fb-card {
+        background: var(--chat-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 18px 20px;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.04);
+      }
+      .admin-fb-card-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+      .admin-fb-agent-name {
+        font-size: 15px;
+        font-weight: 700;
+        color: var(--text);
+      }
+      .admin-fb-counts {
+        display: flex;
+        gap: 12px;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .admin-fb-up {
+        color: #16a34a;
+      }
+      .admin-fb-down {
+        color: #dc4f4f;
+      }
+      .admin-fb-bar {
+        display: flex;
+        height: 8px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: var(--border);
+      }
+      .admin-fb-bar-up {
+        background: #16a34a;
+      }
+      .admin-fb-bar-down {
+        background: #dc4f4f;
+      }
+      .admin-fb-empty-comments {
+        margin-top: 10px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .admin-fb-comments {
+        margin-top: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .admin-fb-comment {
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 8px 10px;
+        background: var(--app-bg, #f8fafc);
+      }
+      .admin-fb-comment.down {
+        border-left-color: #dc4f4f;
+      }
+      .admin-fb-comment-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 4px;
+      }
+      .admin-fb-comment-icon {
+        font-size: 13px;
+      }
+      .admin-fb-comment-date {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .admin-fb-comment-text {
+        font-size: 13px;
+        color: var(--text);
+        white-space: pre-wrap;
+      }
+      .admin-fb-goto {
+        margin-top: 8px;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 5px 12px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--accent);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .admin-fb-goto:hover {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+      }
+      /* 읽기전용 대화 뷰어(피드백 바로가기 대상) */
+      .session-view-chat {
+        width: 100%;
+        max-width: 860px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        background: var(--chat-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 24px;
+      }
+
+      /* ── 피드백 통계 대시보드 ── */
+      .admin-fb-main { max-width: 920px; margin: 0 auto; width: 100%; }
+      .fb-period-bar { display: flex; gap: 8px; width: 100%; }
+      .fb-period-chip {
+        font-size: 13px;
+        padding: 7px 16px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--chat-bg);
+        color: var(--muted);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .fb-period-chip:hover { border-color: var(--accent); color: var(--accent); }
+      .fb-period-chip.active {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+        font-weight: 600;
+      }
+      .fb-kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 14px;
+        width: 100%;
+      }
+      .fb-kpi-card {
+        background: var(--chat-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+      }
+      .fb-kpi-num { font-size: 30px; font-weight: 800; color: var(--text); }
+      .fb-kpi-label { font-size: 13px; color: var(--muted); }
+      .fb-two-col {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        width: 100%;
+      }
+      .fb-section {
+        background: var(--chat-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 18px 20px;
+        width: 100%;
+      }
+      .fb-section-title {
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--text);
+        margin: 0 0 14px;
+      }
+      .fb-empty { font-size: 13px; color: var(--muted); padding: 12px 0; text-align: center; }
+      /* 에이전트별 긍정률 */
+      .fb-agent-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+      .fb-agent-row:last-child { border-bottom: none; }
+      .fb-agent-row-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+      .fb-agent-name { font-size: 14px; font-weight: 600; color: var(--text); }
+      .fb-agent-meta { display: flex; align-items: center; gap: 8px; }
+      .fb-agent-rate { font-size: 13px; font-weight: 700; color: var(--text); }
+      .fb-badge { font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 999px; }
+      .fb-badge-good { background: rgba(22,163,74,0.14); color: #16a34a; }
+      .fb-badge-mid { background: rgba(224,150,40,0.16); color: #d98018; }
+      .fb-badge-bad { background: rgba(220,80,80,0.14); color: #dc4f4f; }
+      .fb-badge-none { background: var(--border); color: var(--muted); }
+      .fb-rate-track { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; }
+      .fb-rate-fill { height: 100%; background: #16a34a; }
+      .fb-agent-counts { font-size: 12px; color: var(--muted); margin-top: 5px; }
+      /* 부정 사유 칩 */
+      .fb-tag-chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+      .fb-tag-chip {
+        font-size: 12px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--muted);
+      }
+      .fb-tag-chip.sm { font-size: 11px; padding: 2px 8px; }
+      /* 코멘트 테이블 */
+      .fb-comments-table { display: flex; flex-direction: column; }
+      .fb-comment-row {
+        display: grid;
+        grid-template-columns: 130px 1fr auto;
+        gap: 14px;
+        padding: 12px 0;
+        border-bottom: 1px solid var(--border);
+        align-items: start;
+      }
+      .fb-comment-row:last-child { border-bottom: none; }
+      .fb-comment-agent { font-size: 13px; font-weight: 600; color: var(--text); }
+      .fb-comment-text { font-size: 13px; color: var(--text); white-space: pre-wrap; }
+      .fb-row-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+      .fb-comment-aside { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+      .fb-comment-date { font-size: 11px; color: var(--muted); white-space: nowrap; }
+      .fb-goto-btn {
+        font-size: 11px;
+        font-weight: 600;
+        padding: 4px 10px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--accent);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .fb-goto-btn:hover { background: var(--accent-soft); border-color: var(--accent); }
+      .fb-more-btn {
+        margin-top: 14px;
+        width: 100%;
+        font-size: 13px;
+        padding: 9px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .fb-more-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+      .fb-more-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+      @media (max-width: 760px) {
+        .fb-kpi-grid { grid-template-columns: repeat(2, 1fr); }
+        .fb-two-col { grid-template-columns: 1fr; }
+        .fb-comment-row { grid-template-columns: 1fr; }
+      }
+
+      /* 👎 부정 사유 수집 칩(채팅 화면) */
+      .feedback-tag-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+      .feedback-tag-chip {
+        font-size: 12px;
+        padding: 5px 11px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--chat-bg);
+        color: var(--muted);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .feedback-tag-chip:hover { border-color: var(--accent); }
+      .feedback-tag-chip.active {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: var(--accent);
+        font-weight: 600;
+      }
+
+      /* 사이드바 피드백 통계 진입 버튼 */
+      .sidebar-feedback-stats {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 4px 8px;
+        padding: 9px 12px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .sidebar-feedback-stats:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+
       /* ── 질문 인라인 수정 에디터 ── */
       /* 사용자 메시지 액션(수정 버튼)은 우측 정렬 버블에 맞춰 오른쪽으로 */
       .message-row.user .message-actions {
@@ -3602,6 +4295,52 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
     <script src="https://cdn.ckeditor.com/ckeditor5/48.0.1/ckeditor5.umd.js"></script>
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+    <!-- 카카오 공유 SDK. JS 앱키는 공개용 클라이언트 키라 소스에 직접 둔다(도메인 등록으로 보호).
+         → 배포 때마다 sed 치환 불필요. 키 교체 시 아래 값만 바꾸면 됨. -->
+    <script>
+      window.__KAKAO_APP_KEY__ = "0ebd1722aecd4f2452b5ca48cdc240c3";
+    </script>
+    <script src="https://t1.kakaocdn.net/kakao_js_sdk/2.7.4/kakao.min.js"></script>
+    <script>
+      (function () {
+        try {
+          var key = window.__KAKAO_APP_KEY__ || "";
+          // 빈 값이거나 플레이스홀더가 치환되지 않았으면(키에 '%%' 포함) 미설정으로 간주.
+          var configured = key && key.indexOf("%%") === -1;
+          if (configured && window.Kakao && !window.Kakao.isInitialized()) {
+            window.Kakao.init(key);
+          }
+        } catch (e) {
+          console.error("Kakao init failed", e);
+        }
+      })();
+
+      // Rust(WASM)에서 호출하는 카카오 공유 래퍼. SDK 미로드/미초기화면 false 반환.
+      // 타이틀은 고정, 인자는 (url, description) 2개.
+      window.shareKakao = function (url, description) {
+        try {
+          if (
+            !window.Kakao ||
+            typeof window.Kakao.isInitialized !== "function" ||
+            !window.Kakao.isInitialized()
+          ) {
+            return false;
+          }
+          window.Kakao.Share.sendDefault({
+            objectType: "feed",
+            content: {
+              title: "EHS AI 답변",
+              description: description,
+              link: { mobileWebUrl: url, webUrl: url },
+            },
+          });
+          return true;
+        } catch (e) {
+          console.error("Kakao share failed", e);
+          return false;
+        }
+      };
+    </script>
     <script>
       const boardPostEditors = new Map();
 
@@ -4302,135 +5041,6 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         });
       }
     </script>
-  <link rel="modulepreload" href="/pekko-agent-web-chat-a50f3778b76d12da.js" crossorigin="anonymous" integrity="sha384-3NjumRsTya0+on2rifQzMbPQ4qYsSKd8PAn5n6n/lMmvR5UBCk/bijstsz03JRQd"><link rel="preload" href="/pekko-agent-web-chat-a50f3778b76d12da_bg.wasm" crossorigin="anonymous" integrity="sha384-VPu/Q9gaQ8IdukjhzvU4aAUbRtOJvNsA0LTRgYHNdrhdXijTOzjgcuVDqZV8gLNx" as="fetch" type="application/wasm"></head>
-  <body><script>"use strict";
-
-(function () {
-
-    const address = '{{__TRUNK_ADDRESS__}}';
-    const base = '{{__TRUNK_WS_BASE__}}';
-    let protocol = '';
-    protocol =
-        protocol
-            ? protocol
-            : window.location.protocol === 'https:'
-                ? 'wss'
-                : 'ws';
-    const url = protocol + '://' + address + base + '.well-known/trunk/ws';
-
-    class Overlay {
-        constructor() {
-            // create an overlay
-            this._overlay = document.createElement("div");
-            const style = this._overlay.style;
-            style.height = "100vh";
-            style.width = "100vw";
-            style.position = "fixed";
-            style.top = "0";
-            style.left = "0";
-            style.backgroundColor = "rgba(222, 222, 222, 0.5)";
-            style.fontFamily = "sans-serif";
-            // not sure that's the right approach
-            style.zIndex = "1000000";
-            style.backdropFilter = "blur(1rem)";
-
-            const container = document.createElement("div");
-            // center it
-            container.style.position = "absolute";
-            container.style.top = "30%";
-            container.style.left = "15%";
-            container.style.maxWidth = "85%";
-
-            this._title = document.createElement("div");
-            this._title.innerText = "Build failure";
-            this._title.style.paddingBottom = "2rem";
-            this._title.style.fontSize = "2.5rem";
-
-            this._message = document.createElement("div");
-            this._message.style.whiteSpace = "pre-wrap";
-
-            const icon= document.createElement("div");
-            icon.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" fill="#dc3545" viewBox="0 0 16 16"><path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/></svg>';
-            this._title.prepend(icon);
-
-            container.append(this._title, this._message);
-            this._overlay.append(container);
-
-            this._inject();
-            window.setInterval(() => {
-                this._inject();
-            }, 250);
-        }
-
-        set reason(reason) {
-            this._message.textContent = reason;
-        }
-
-        _inject() {
-            if (!this._overlay.isConnected) {
-                // prepend it
-                document.body?.prepend(this._overlay);
-            }
-        }
-
-    }
-
-    class Client {
-        constructor(url) {
-            this.url = url;
-            this.poll_interval = 5000;
-            this._overlay = null;
-        }
-
-        start() {
-            const ws = new WebSocket(this.url);
-            ws.onmessage = (ev) => {
-                const msg = JSON.parse(ev.data);
-                switch (msg.type) {
-                    case "reload":
-                        this.reload();
-                        break;
-                    case "buildFailure":
-                        this.buildFailure(msg.data)
-                        break;
-                }
-            };
-            ws.onclose = () => this.onclose();
-        }
-
-        onclose() {
-            window.setTimeout(
-                () => {
-                    // when we successfully reconnect, we'll force a
-                    // reload (since we presumably lost connection to
-                    // trunk due to it being killed, so it will have
-                    // rebuilt on restart)
-                    const ws = new WebSocket(this.url);
-                    ws.onopen = () => window.location.reload();
-                    ws.onclose = () => this.onclose();
-                },
-                this.poll_interval);
-        }
-
-        reload() {
-            window.location.reload();
-        }
-
-        buildFailure({reason}) {
-            // also log the console
-            console.error("Build failed:", reason);
-
-            console.debug("Overlay", this._overlay);
-
-            if (!this._overlay) {
-                this._overlay = new Overlay();
-            }
-            this._overlay.reason = reason;
-        }
-    }
-
-    new Client(url).start();
-
-})()
-</script></body>
+  <link rel="modulepreload" href="/pekko-agent-web-chat-2c86b8886086e9bd.js" crossorigin="anonymous" integrity="sha384-JFEHnGOIguIM19m8Jd1kUyH4r3va3SlJ94ULjLeO4friQQKelW3qISypNpdNpviR"><link rel="preload" href="/pekko-agent-web-chat-2c86b8886086e9bd_bg.wasm" crossorigin="anonymous" integrity="sha384-Wi80xe+Rt018wzWKlo9qhx2QCJnvlTyKCTEBiZ2j2IyXrflUyrso9p0tl4Bl0LoT" as="fetch" type="application/wasm"></head>
+  <body></body>
 </html>

@@ -197,6 +197,7 @@ pub async fn login(
             company_code: login.company_code,
             role: login.role,
             profile_image_url: login.profile_image_url,
+            is_feedback_admin: login.is_feedback_admin,
         })
     } else {
         let err = resp
@@ -233,6 +234,7 @@ pub async fn fetch_me() -> Result<Option<AuthUser>, String> {
             company_code: login.company_code,
             role: login.role,
             profile_image_url: login.profile_image_url,
+            is_feedback_admin: login.is_feedback_admin,
         }))
     } else if resp.status() == 401 {
         Ok(None)
@@ -340,6 +342,30 @@ pub async fn create_share(
     }
 }
 
+/// POST /api/feedback — 답변 1개(특정 버전)에 👍/👎 평가를 보낸다. `active=false`면
+/// 토글 취소(평가 삭제). 로그인 쿠키 필수. 성공 시 `Ok(())`.
+pub async fn submit_feedback(body: &FeedbackRequest) -> Result<(), String> {
+    let url = api_url("/api/feedback");
+    let resp = with_credentials(Request::post(&url))
+        .header("Content-Type", "application/json")
+        .json(body)
+        .map_err(|e| format!("Serialize error: {e}"))?
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+
+    if resp.ok() {
+        Ok(())
+    } else {
+        let err = resp
+            .json::<ErrorResponse>()
+            .await
+            .map(|e| e.error)
+            .unwrap_or_else(|_| format!("HTTP {}", resp.status()));
+        Err(err)
+    }
+}
+
 /// GET /api/share/:id — 공유된 답변을 조회한다. 상태코드별로 `ShareFetchError`를
 /// 구분해 열람 페이지가 로그인 유도/접근 거부/없음 안내를 분기할 수 있게 한다.
 pub async fn fetch_shared(share_id: &str) -> Result<SharedAnswer, ShareFetchError> {
@@ -358,6 +384,53 @@ pub async fn fetch_shared(share_id: &str) -> Result<SharedAnswer, ShareFetchErro
         403 => Err(ShareFetchError::Forbidden),
         404 => Err(ShareFetchError::NotFound),
         status => Err(ShareFetchError::Other(format!("HTTP {status}"))),
+    }
+}
+
+/// GET /api/admin/feedback/stats?period= — 회사+기간 단위 대시보드 집계(허용목록 사원만).
+/// 상태코드별로 `FeedbackStatsError`를 구분해 관리자 페이지가 로그인/권한/오류를 분기한다.
+pub async fn fetch_feedback_stats(
+    period: &str,
+) -> Result<FeedbackStatsResponse, FeedbackStatsError> {
+    let url = api_url(&format!("/api/admin/feedback/stats?period={period}"));
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| FeedbackStatsError::Other(format!("Network error: {e}")))?;
+
+    match resp.status() {
+        200 => resp
+            .json::<FeedbackStatsResponse>()
+            .await
+            .map_err(|e| FeedbackStatsError::Other(format!("Parse error: {e}"))),
+        401 => Err(FeedbackStatsError::Unauthorized),
+        403 => Err(FeedbackStatsError::Forbidden),
+        status => Err(FeedbackStatsError::Other(format!("HTTP {status}"))),
+    }
+}
+
+/// GET /api/admin/feedback/comments — 부정 코멘트 목록(페이지네이션). 같은 게이팅/에러 분기.
+pub async fn fetch_feedback_comments(
+    period: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<FeedbackCommentsResponse, FeedbackStatsError> {
+    let url = api_url(&format!(
+        "/api/admin/feedback/comments?period={period}&limit={limit}&offset={offset}"
+    ));
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| FeedbackStatsError::Other(format!("Network error: {e}")))?;
+
+    match resp.status() {
+        200 => resp
+            .json::<FeedbackCommentsResponse>()
+            .await
+            .map_err(|e| FeedbackStatsError::Other(format!("Parse error: {e}"))),
+        401 => Err(FeedbackStatsError::Unauthorized),
+        403 => Err(FeedbackStatsError::Forbidden),
+        status => Err(FeedbackStatsError::Other(format!("HTTP {status}"))),
     }
 }
 

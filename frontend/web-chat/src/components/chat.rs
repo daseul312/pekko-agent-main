@@ -7,7 +7,7 @@ use crate::components::message::{MessageBubble, ProcessSteps, TypingIndicator};
 use crate::components::suggestions::Suggestions;
 use crate::types::{
     AgentMeta, BoardPostCompletion, BoardPostTarget, ChatMessage, ChatMessageUi, FavoriteQuestion,
-    MessageRole, ProcessStep,
+    FeedbackSubmission, MessageRole, ProcessStep,
 };
 
 #[derive(Properties, PartialEq)]
@@ -23,6 +23,8 @@ pub struct ChatProps {
     /// "질문 수정": (user 메시지 id, 수정된 질문 내용).
     pub on_edit_message: Callback<(String, String)>,
     pub on_select_response_page: Callback<(String, usize)>,
+    /// 답변 피드백(👍/👎) 제출.
+    pub on_feedback: Callback<FeedbackSubmission>,
     pub on_board_post_target_selected: Callback<BoardPostTarget>,
     pub on_board_post_complete: Callback<BoardPostCompletion>,
     pub on_example_click: Callback<String>,
@@ -297,6 +299,7 @@ pub fn chat_area(props: &ChatProps) -> Html {
                                 on_retry_with_agent={props.on_retry_with_agent.clone()}
                                 on_edit_message={props.on_edit_message.clone()}
                                 on_select_response_page={props.on_select_response_page.clone()}
+                                on_feedback={props.on_feedback.clone()}
                                 on_board_post_target_selected={props.on_board_post_target_selected.clone()}
                                 on_board_post_complete={props.on_board_post_complete.clone()}
                                 on_favorite_toggle={props.on_message_favorite_toggle.clone()}

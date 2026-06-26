@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State, Json},
+    extract::{Path, Query, State, Json},
     routing::{get, post},
     Router,
     http::{StatusCode, header, HeaderValue, Method},
@@ -18,7 +18,7 @@ use tracing::{info, error, warn};
 use pekko_agent_core::{Message, TokenUsage, ShortTermMemory, ToolContext, AgentInfo, AgentStatus};
 use pekko_agent_llm::{LlmConfig, ClaudeClient, OpenAIClient, LlmRequest, ClaudeMessage, ContentBlock, ClaudeTool};
 use pekko_agent_tools::{ToolRegistry, builtin::{PermitSearchTool, ComplianceCheckTool, EhsQueryTool, LawCompareTool, VisualizeTool}};
-use pekko_agent_memory::{CoreDbConversationStore, CoreDbShareStore, InMemoryVectorStore, InMemoryEpisodicStore};
+use pekko_agent_memory::{CoreDbConversationStore, CoreDbShareStore, CoreDbFeedbackStore, InMemoryVectorStore, InMemoryEpisodicStore};
 use coredb::{CoreDB, DatabaseConfig};
 use pekko_agent_orchestrator::OrchestratorActor;
 use pekko_agent_events::EventPublisher;
@@ -36,6 +36,8 @@ struct AppState {
     conversation_store: Arc<CoreDbConversationStore>,
     /// 답변 공유(share) 저장소. 운영 PG가 아니라 임베디드 CoreDB에 보관한다.
     share_store: Arc<CoreDbShareStore>,
+    /// 답변 피드백(👍/👎) 저장소. 운영 PG가 아니라 임베디드 CoreDB에 보관한다.
+    feedback_store: Arc<CoreDbFeedbackStore>,
     vector_store: Arc<InMemoryVectorStore>,
     episodic_store: Arc<InMemoryEpisodicStore>,
     orchestrator: Arc<RwLock<OrchestratorActor>>,
@@ -513,6 +515,139 @@ struct SharedAnswerResponse {
     created_at: chrono::DateTime<chrono::Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chart_data: Option<String>,
+}
+
+/// POST /api/feedback 요청. 답변 1개(특정 버전)에 대한 👍/👎 평가와 선택적 코멘트.
+#[derive(Deserialize)]
+struct FeedbackRequest {
+    /// 추적/키 구성용 세션 id(없어도 동작).
+    #[serde(default)]
+    session_id: Option<Uuid>,
+    /// 프론트의 클라이언트측 assistant 메시지 id(키 구성용).
+    message_id: String,
+    /// 평가 대상 답변 버전 인덱스(재생성 버전 구분).
+    #[serde(default)]
+    response_index: i64,
+    /// 답변한 에이전트 id(에이전트별 집계용).
+    #[serde(default)]
+    agent_id: String,
+    /// "up" | "down".
+    rating: String,
+    /// 선택적 코멘트(주로 👎).
+    #[serde(default)]
+    comment: Option<String>,
+    /// 답변 본문 앞부분 스냅샷(분석 맥락용). 서버에서 길이 제한한다.
+    #[serde(default)]
+    content_excerpt: Option<String>,
+    /// 부정 사유 태그(👎 다중 선택). 서버에서 개수·길이 제한한다.
+    #[serde(default)]
+    tags: Vec<String>,
+    /// false면 토글 취소(평가 삭제).
+    #[serde(default)]
+    active: bool,
+}
+
+/// POST /api/feedback 응답.
+#[derive(Serialize)]
+struct FeedbackResponse {
+    ok: bool,
+}
+
+/// GET /api/admin/feedback/stats 응답. 회사+기간 단위 대시보드 집계.
+#[derive(Serialize)]
+struct FeedbackStatsResponse {
+    total_up: i64,
+    total_down: i64,
+    /// 실제 코멘트가 달린 피드백 건수(KPI).
+    comment_count: i64,
+    /// 에이전트별 up/down(긍정률·배지는 프론트 계산).
+    agents: Vec<AgentRate>,
+    /// 부정 사유 태그 빈도(고정 5종 순서).
+    tag_counts: Vec<TagCount>,
+    /// 월별 추세(YYYY-MM 오름차순).
+    trend: Vec<TrendPoint>,
+}
+
+#[derive(Serialize)]
+struct AgentRate {
+    agent_id: String,
+    up: i64,
+    down: i64,
+}
+
+#[derive(Serialize)]
+struct TagCount {
+    tag: String,
+    count: i64,
+}
+
+#[derive(Serialize)]
+struct TrendPoint {
+    month: String,
+    up: i64,
+    down: i64,
+}
+
+/// GET /api/admin/feedback/comments 응답(페이지네이션).
+#[derive(Serialize)]
+struct FeedbackCommentsResponse {
+    items: Vec<CommentRow>,
+    total: i64,
+}
+
+#[derive(Serialize)]
+struct CommentRow {
+    agent_id: String,
+    rating: String,
+    comment: Option<String>,
+    tags: Vec<String>,
+    /// 원본 대화 세션 id(빈 문자열이면 바로가기 불가).
+    session_id: String,
+    created_at: String,
+}
+
+/// 부정 사유 고정 5종(수집 칩과 동일 순서). 통계 도넛/칩의 안정적 순서 보장.
+const FEEDBACK_TAGS: [&str; 5] = [
+    "출처/근거 불명확",
+    "내용 부정확",
+    "답변이 너무 길다",
+    "최신 정보 미반영",
+    "기타",
+];
+
+/// `period` 쿼리값을 created_at(RFC3339 문자열) 하한 비교용 경계로 바꾼다.
+/// "month"=이번 달 1일, "3m"=3개월 전, 그 외/"all"=제한 없음(None).
+fn period_cutoff(period: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let now = chrono::Utc::now();
+    match period {
+        "month" => {
+            use chrono::Datelike;
+            now.date_naive()
+                .with_day(1)
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+                .map(|naive| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc))
+        }
+        "3m" => Some(now - chrono::Duration::days(90)),
+        _ => None,
+    }
+}
+
+/// period 쿼리 파라미터.
+#[derive(Deserialize)]
+struct StatsQuery {
+    #[serde(default)]
+    period: Option<String>,
+}
+
+/// comments 페이지네이션 쿼리.
+#[derive(Deserialize)]
+struct CommentsQuery {
+    #[serde(default)]
+    period: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
 }
 
 /// Build the system prompt based on the selected agent.
@@ -1220,9 +1355,16 @@ async fn execute_agent_query(
                 .to_string();
     }
 
-    // Store the assistant response
+    // Store the assistant response. 차트가 있으면 같은 메시지(seq_num)에 연결 저장해
+    // 읽기전용 대화 뷰어가 그래프까지 복원할 수 있게 한다.
     let assistant_msg = Message::assistant(&final_text);
-    let _ = conv_store.append_message(&session_id, assistant_msg).await;
+    if let Ok(seq) = conv_store.append_returning_seq(&session_id, assistant_msg).await {
+        if let Some(chart) = &captured_chart {
+            if let Ok(json) = serde_json::to_string(chart) {
+                let _ = conv_store.set_message_chart(&session_id, seq, &json).await;
+            }
+        }
+    }
 
     // Deduplicate tools_used
     all_tools_used.sort();
@@ -2154,16 +2296,33 @@ async fn run_query_pipeline(
     })
 }
 
-/// GET /api/sessions/:session_id/history - Get conversation history for a session
+/// 대화 기록 1턴(읽기전용 뷰어용). 답변에 그래프가 있으면 `chart_data`(JSON 문자열)도 함께.
+#[derive(Serialize)]
+struct HistoryTurn {
+    role: String,
+    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chart_data: Option<String>,
+}
+
+/// GET /api/sessions/:session_id/history - Get conversation history for a session.
+/// 답변별 차트(있으면)도 함께 반환해, 읽기전용 대화 뷰어가 그래프를 복원할 수 있게 한다.
 async fn get_session_history(
     Path(session_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let messages = state.conversation_store
-        .get_conversation(&session_id)
+    let turns = state
+        .conversation_store
+        .get_conversation_with_charts(&session_id)
         .await
-        .unwrap_or_default();
-    Json(messages)
+        .into_iter()
+        .map(|t| HistoryTurn {
+            role: t.role,
+            content: t.content,
+            chart_data: t.chart_data,
+        })
+        .collect::<Vec<_>>();
+    Json(turns)
 }
 
 /// GET /api/sessions/:session_id/summarize - Summarize a session into a title
@@ -2365,6 +2524,309 @@ async fn get_share(
     }))
 }
 
+/// POST /api/feedback - 답변 1개(특정 버전)에 👍/👎 평가를 남긴다.
+///
+/// 로그인 필수(세션 쿠키). 같은 `(session_id, message_id, response_index)`로 다시 보내면
+/// 덮어쓰고(재투표·👍↔👎 변경), `active=false`면 평가를 삭제(토글 취소)한다.
+/// 운영 PG가 아니라 임베디드 CoreDB에만 저장한다.
+async fn submit_feedback(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Json(req): Json<FeedbackRequest>,
+) -> Result<Json<FeedbackResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "로그인이 필요합니다.".into(),
+                code: "UNAUTHORIZED".into(),
+            }),
+        )
+    })?;
+
+    if req.rating != "up" && req.rating != "down" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "rating은 'up' 또는 'down'이어야 합니다.".into(),
+                code: "BAD_REQUEST".into(),
+            }),
+        ));
+    }
+
+    let session_str = req
+        .session_id
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let feedback_key = format!("{}|{}|{}", session_str, req.message_id, req.response_index);
+
+    // active=false면 토글 취소 → 삭제.
+    if !req.active {
+        state
+            .feedback_store
+            .delete(&feedback_key)
+            .await
+            .map_err(feedback_db_error)?;
+        return Ok(Json(FeedbackResponse { ok: true }));
+    }
+
+    // 코멘트/본문 스냅샷은 과도한 길이를 막기 위해 잘라 저장한다.
+    let comment = req
+        .comment
+        .as_deref()
+        .map(|c| truncate_chars(c.trim(), 1000))
+        .filter(|c| !c.is_empty());
+    let excerpt = req
+        .content_excerpt
+        .as_deref()
+        .map(|c| truncate_chars(c, 500))
+        .filter(|c| !c.is_empty());
+    // 태그는 고정 사유 5종만 허용(임의 입력·과다 개수 방지).
+    let tags: Vec<String> = req
+        .tags
+        .iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| FEEDBACK_TAGS.contains(&t.as_str()))
+        .collect();
+    let created_at = chrono::Utc::now().to_rfc3339();
+
+    state
+        .feedback_store
+        .upsert(
+            &feedback_key,
+            &session_str,
+            &req.message_id,
+            req.response_index,
+            &req.agent_id,
+            &req.rating,
+            comment.as_deref(),
+            &identity.employee_id,
+            &identity.company_code,
+            excerpt.as_deref(),
+            &created_at,
+            &tags,
+        )
+        .await
+        .map_err(feedback_db_error)?;
+
+    Ok(Json(FeedbackResponse { ok: true }))
+}
+
+/// 피드백 저장소 에러를 500 응답으로 변환한다.
+fn feedback_db_error(e: pekko_agent_core::MemoryError) -> (StatusCode, Json<ErrorResponse>) {
+    error!(error = %e, "피드백 저장/삭제 실패");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: format!("피드백 처리 실패: {e}"),
+            code: "DB_ERROR".into(),
+        }),
+    )
+}
+
+/// 문자 기준으로 최대 `max`자까지 자른다(바이트 경계 패닉 방지).
+fn truncate_chars(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
+/// 피드백 통계 조회 권한 검사. `FEEDBACK_ADMIN_IDS`(콤마분리 사원ID 목록)에 포함된
+/// 사원만 허용한다. 미설정/빈 값이면 아무도 통과하지 못한다(안전 기본값).
+fn is_feedback_admin(employee_id: &str) -> bool {
+    let id = employee_id.trim();
+    if id.is_empty() {
+        return false;
+    }
+    std::env::var("FEEDBACK_ADMIN_IDS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim())
+        .any(|allowed| !allowed.is_empty() && allowed == id)
+}
+
+/// 피드백 통계 권한 검사 + 회사·기간 필터된 레코드 로드(공통).
+/// 로그인 필수(401), 허용목록 외 403. 조회자 회사 + period 컷오프로 필터해 돌려준다.
+async fn load_feedback_for_admin(
+    state: &AppState,
+    auth: Option<crate::auth::AuthIdentity>,
+    period: &str,
+) -> Result<Vec<pekko_agent_memory::FeedbackRecord>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "로그인이 필요합니다.".into(),
+                code: "UNAUTHORIZED".into(),
+            }),
+        )
+    })?;
+    if !is_feedback_admin(&identity.employee_id) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "관리자 권한이 필요합니다.".into(),
+                code: "FORBIDDEN".into(),
+            }),
+        ));
+    }
+
+    let cutoff = period_cutoff(period);
+    let records = state.feedback_store.list_all().await.map_err(|e| {
+        error!(error = %e, "피드백 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("피드백 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let filtered = records
+        .into_iter()
+        .filter(|r| r.company_code == identity.company_code)
+        .filter(|r| match cutoff {
+            None => true,
+            Some(c) => chrono::DateTime::parse_from_rfc3339(&r.created_at)
+                .map(|dt| dt.with_timezone(&chrono::Utc) >= c)
+                .unwrap_or(true),
+        })
+        .collect();
+    Ok(filtered)
+}
+
+/// 코멘트 정규화: 빈 문자열·과거 "null" 문자열은 코멘트 없음(None)으로 본다.
+fn normalize_comment(comment: &Option<String>) -> Option<String> {
+    comment
+        .clone()
+        .filter(|c| !c.trim().is_empty() && c != "null")
+}
+
+/// GET /api/admin/feedback/stats?period=month|3m|all - 대시보드 집계.
+async fn get_feedback_stats(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Query(q): Query<StatsQuery>,
+) -> Result<Json<FeedbackStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let period = q.period.as_deref().unwrap_or("all");
+    let records = load_feedback_for_admin(&state, auth, period).await?;
+
+    let mut total_up = 0i64;
+    let mut total_down = 0i64;
+    let mut comment_count = 0i64;
+    let mut by_agent: HashMap<String, AgentRate> = HashMap::new();
+    let mut tag_map: HashMap<String, i64> = HashMap::new();
+    // 월별 추세: "YYYY-MM" → (up, down).
+    let mut trend_map: HashMap<String, (i64, i64)> = HashMap::new();
+
+    for r in &records {
+        let is_up = r.rating == "up";
+        let is_down = r.rating == "down";
+        if is_up {
+            total_up += 1;
+        } else if is_down {
+            total_down += 1;
+        }
+        if normalize_comment(&r.comment).is_some() {
+            comment_count += 1;
+        }
+
+        let entry = by_agent
+            .entry(r.agent_id.clone())
+            .or_insert_with(|| AgentRate {
+                agent_id: r.agent_id.clone(),
+                up: 0,
+                down: 0,
+            });
+        if is_up {
+            entry.up += 1;
+        } else if is_down {
+            entry.down += 1;
+        }
+
+        if is_down {
+            for t in &r.tags {
+                *tag_map.entry(t.clone()).or_insert(0) += 1;
+            }
+        }
+
+        // 월 키(YYYY-MM). 파싱 실패 행은 추세에서 제외.
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&r.created_at) {
+            let month = dt.format("%Y-%m").to_string();
+            let e = trend_map.entry(month).or_insert((0, 0));
+            if is_up {
+                e.0 += 1;
+            } else if is_down {
+                e.1 += 1;
+            }
+        }
+    }
+
+    // 에이전트: 총건수 많은 순.
+    let mut agents: Vec<AgentRate> = by_agent.into_values().collect();
+    agents.sort_by(|a, b| (b.up + b.down).cmp(&(a.up + a.down)));
+
+    // 태그: 고정 5종 순서, 건수 0도 포함(도넛에서 일관 표시).
+    let tag_counts = FEEDBACK_TAGS
+        .iter()
+        .map(|t| TagCount {
+            tag: t.to_string(),
+            count: *tag_map.get(*t).unwrap_or(&0),
+        })
+        .collect();
+
+    // 추세: 월 오름차순.
+    let mut trend: Vec<TrendPoint> = trend_map
+        .into_iter()
+        .map(|(month, (up, down))| TrendPoint { month, up, down })
+        .collect();
+    trend.sort_by(|a, b| a.month.cmp(&b.month));
+
+    Ok(Json(FeedbackStatsResponse {
+        total_up,
+        total_down,
+        comment_count,
+        agents,
+        tag_counts,
+        trend,
+    }))
+}
+
+/// GET /api/admin/feedback/comments?period=&limit=&offset= - 부정 코멘트 목록(페이지네이션).
+async fn get_feedback_comments(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Query(q): Query<CommentsQuery>,
+) -> Result<Json<FeedbackCommentsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let period = q.period.as_deref().unwrap_or("all");
+    let limit = q.limit.unwrap_or(20).clamp(1, 100) as usize;
+    let offset = q.offset.unwrap_or(0).max(0) as usize;
+    let records = load_feedback_for_admin(&state, auth, period).await?;
+
+    // 👎 + 실제 코멘트 있는 항목만, 최신순.
+    let mut rows: Vec<CommentRow> = records
+        .into_iter()
+        .filter_map(|r| {
+            let comment = normalize_comment(&r.comment)?;
+            if r.rating != "down" {
+                return None;
+            }
+            Some(CommentRow {
+                agent_id: r.agent_id,
+                rating: r.rating,
+                comment: Some(comment),
+                tags: r.tags,
+                session_id: r.session_id,
+                created_at: r.created_at,
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    let total = rows.len() as i64;
+    let items = rows.into_iter().skip(offset).take(limit).collect();
+    Ok(Json(FeedbackCommentsResponse { items, total }))
+}
+
 /// GET /api/tools - List all available tools
 async fn list_tools(State(state): State<AppState>) -> impl IntoResponse {
     let registry = state.tool_registry.read().await;
@@ -2474,6 +2936,12 @@ async fn main() -> anyhow::Result<()> {
             .await
             .expect("Failed to initialize share store"),
     );
+    // 답변 피드백(👍/👎) 저장소도 같은 임베디드 CoreDB를 사용한다(운영 PG 불필요).
+    let feedback_store = Arc::new(
+        CoreDbFeedbackStore::new(coredb.clone())
+            .await
+            .expect("Failed to initialize feedback store"),
+    );
 
     // RSA keypair for login password encryption. Use LOGIN_RSA_PRIVATE_KEY (PEM) when set
     // for cross-restart / multi-instance stability; otherwise generate an ephemeral key.
@@ -2579,6 +3047,7 @@ async fn main() -> anyhow::Result<()> {
         tool_registry: Arc::new(RwLock::new(tool_registry)),
         conversation_store,
         share_store,
+        feedback_store,
         vector_store: Arc::new(InMemoryVectorStore::new()),
         episodic_store: Arc::new(InMemoryEpisodicStore::new()),
         orchestrator,
@@ -2616,6 +3085,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/sessions/:session_id/summarize", get(summarize_session))
         .route("/api/share", post(create_share))
         .route("/api/share/:share_id", get(get_share))
+        .route("/api/feedback", post(submit_feedback))
+        .route("/api/admin/feedback/stats", get(get_feedback_stats))
+        .route("/api/admin/feedback/comments", get(get_feedback_comments))
         .route("/api/tools", get(list_tools))
         .layer(build_cors_layer())
         .layer(TraceLayer::new_for_http())

@@ -103,6 +103,20 @@ impl CoreDbConversationStore {
         );
         ignore_already_exists(db.execute_cql(&cql).await, "conversations table")?;
 
+        // 메시지별 차트 데이터(불투명 JSON). 대화 본문(conversations)은 LLM 컨텍스트로도
+        // 쓰여 가볍게 유지해야 하므로, 차트는 별도 테이블에 (session_id, seq_num)로 분리 저장한다.
+        // 읽기전용 대화 뷰어가 답변 아래 그래프를 복원하는 데 쓴다.
+        let cql = format!(
+            "CREATE TABLE IF NOT EXISTS {}.message_charts (
+                session_id TEXT,
+                seq_num BIGINT,
+                chart_data TEXT,
+                PRIMARY KEY (session_id, seq_num)
+            )",
+            keyspace
+        );
+        ignore_already_exists(db.execute_cql(&cql).await, "message_charts table")?;
+
         debug!("CoreDB schema initialized for conversations");
         Ok(())
     }
@@ -243,6 +257,40 @@ impl ShortTermMemory for CoreDbConversationStore {
     }
 
     async fn append_message(&self, session_id: &Uuid, msg: Message) -> Result<(), MemoryError> {
+        self.append_returning_seq(session_id, msg).await.map(|_| ())
+    }
+
+    async fn summarize(&self, session_id: &Uuid) -> Result<String, MemoryError> {
+        let messages = self.get_conversation(session_id).await?;
+
+        if messages.is_empty() {
+            return Err(MemoryError::NotFound(format!("Session {} not found", session_id)));
+        }
+
+        let summary = messages
+            .iter()
+            .map(|m| format!("{}: {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+
+        Ok(summary)
+    }
+
+    async fn clear(&self, session_id: &Uuid) -> Result<(), MemoryError> {
+        self.delete_conversation(session_id).await?;
+        info!(session_id = %session_id, "Conversation cleared in CoreDB");
+        Ok(())
+    }
+}
+
+impl CoreDbConversationStore {
+    /// 메시지를 저장하고 부여된 seq_num을 돌려준다(차트를 같은 메시지에 연결하기 위함).
+    /// 트레잇 `append_message`는 이 메서드에 위임한다.
+    pub async fn append_returning_seq(
+        &self,
+        session_id: &Uuid,
+        msg: Message,
+    ) -> Result<i64, MemoryError> {
         let seq = self.get_max_seq(session_id).await? + 1;
 
         let role_str = match msg.role {
@@ -290,30 +338,98 @@ impl ShortTermMemory for CoreDbConversationStore {
             }
         }
 
+        Ok(seq)
+    }
+
+    /// 특정 메시지(seq_num)에 차트 JSON을 연결 저장한다(불투명 문자열).
+    pub async fn set_message_chart(
+        &self,
+        session_id: &Uuid,
+        seq_num: i64,
+        chart_json: &str,
+    ) -> Result<(), MemoryError> {
+        let escaped = chart_json.replace('\'', "''");
+        let cql = format!(
+            "INSERT INTO {}.message_charts (session_id, seq_num, chart_data) VALUES ('{}', {}, '{}')",
+            self.keyspace, session_id, seq_num, escaped
+        );
+        self.db.execute_cql(&cql).await.map_err(|e| {
+            MemoryError::StorageError(format!("Failed to set message chart: {}", e))
+        })?;
+        debug!(session_id = %session_id, seq = seq_num, "Message chart saved to CoreDB");
         Ok(())
     }
 
-    async fn summarize(&self, session_id: &Uuid) -> Result<String, MemoryError> {
-        let messages = self.get_conversation(session_id).await?;
-
-        if messages.is_empty() {
-            return Err(MemoryError::NotFound(format!("Session {} not found", session_id)));
+    /// 세션의 대화를 seq 순서로 (role, content, chart_data?) 형태로 돌려준다.
+    /// `role`은 트레잇 `Message`와 동일하게 PascalCase("User"/"Assistant"/"System"/"Tool")로
+    /// 직렬화해, 읽기전용 뷰어가 차트까지 복원할 수 있게 한다.
+    pub async fn get_conversation_with_charts(
+        &self,
+        session_id: &Uuid,
+    ) -> Vec<ConversationTurn> {
+        // 차트 맵(seq_num → chart_json)을 먼저 읽는다.
+        let mut charts: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+        let chart_cql = format!(
+            "SELECT seq_num, chart_data FROM {}.message_charts WHERE session_id = '{}'",
+            self.keyspace, session_id
+        );
+        if let Ok(QueryResult::Rows(rows)) = self.db.execute_cql(&chart_cql).await {
+            for row in &rows {
+                let seq = match row.columns.get("seq_num") {
+                    Some(coredb::CassandraValue::BigInt(n)) => *n,
+                    Some(coredb::CassandraValue::Int(n)) => *n as i64,
+                    _ => continue,
+                };
+                if let Some(coredb::CassandraValue::Text(json)) = row.columns.get("chart_data") {
+                    charts.insert(seq, json.clone());
+                }
+            }
         }
 
-        let summary = messages
-            .iter()
-            .map(|m| format!("{}: {}", m.role, m.content))
-            .collect::<Vec<_>>()
-            .join("\n---\n");
-
-        Ok(summary)
+        let cql = format!(
+            "SELECT role, content, seq_num FROM {}.conversations WHERE session_id = '{}' ORDER BY seq_num",
+            self.keyspace, session_id
+        );
+        match self.db.execute_cql(&cql).await {
+            Ok(QueryResult::Rows(rows)) => rows
+                .iter()
+                .filter_map(|row| {
+                    let role = match row.columns.get("role") {
+                        Some(coredb::CassandraValue::Text(s)) => match s.as_str() {
+                            "user" => "User",
+                            "assistant" => "Assistant",
+                            "system" => "System",
+                            "tool" => "Tool",
+                            _ => "Assistant",
+                        },
+                        _ => return None,
+                    };
+                    let content = match row.columns.get("content") {
+                        Some(coredb::CassandraValue::Text(s)) => s.clone(),
+                        _ => return None,
+                    };
+                    let seq = match row.columns.get("seq_num") {
+                        Some(coredb::CassandraValue::BigInt(n)) => *n,
+                        Some(coredb::CassandraValue::Int(n)) => *n as i64,
+                        _ => -1,
+                    };
+                    Some(ConversationTurn {
+                        role: role.to_string(),
+                        content,
+                        chart_data: charts.get(&seq).cloned(),
+                    })
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
     }
+}
 
-    async fn clear(&self, session_id: &Uuid) -> Result<(), MemoryError> {
-        self.delete_conversation(session_id).await?;
-        info!(session_id = %session_id, "Conversation cleared in CoreDB");
-        Ok(())
-    }
+/// 읽기전용 대화 뷰어용 턴(역할·본문·선택적 차트 JSON).
+pub struct ConversationTurn {
+    pub role: String,
+    pub content: String,
+    pub chart_data: Option<String>,
 }
 
 impl Clone for CoreDbConversationStore {
