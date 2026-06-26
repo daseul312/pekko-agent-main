@@ -18,7 +18,7 @@ use tracing::{info, error, warn};
 use pekko_agent_core::{Message, TokenUsage, ShortTermMemory, ToolContext, AgentInfo, AgentStatus};
 use pekko_agent_llm::{LlmConfig, ClaudeClient, OpenAIClient, LlmRequest, ClaudeMessage, ContentBlock, ClaudeTool};
 use pekko_agent_tools::{ToolRegistry, builtin::{PermitSearchTool, ComplianceCheckTool, EhsQueryTool, LawCompareTool, VisualizeTool}};
-use pekko_agent_memory::{CoreDbConversationStore, CoreDbShareStore, CoreDbFeedbackStore, InMemoryVectorStore, InMemoryEpisodicStore};
+use pekko_agent_memory::{CoreDbConversationStore, CoreDbShareStore, CoreDbFeedbackStore, CoreDbResolutionStore, CoreDbNotificationStore, InMemoryVectorStore, InMemoryEpisodicStore};
 use coredb::{CoreDB, DatabaseConfig};
 use pekko_agent_orchestrator::OrchestratorActor;
 use pekko_agent_events::EventPublisher;
@@ -38,6 +38,10 @@ struct AppState {
     share_store: Arc<CoreDbShareStore>,
     /// 답변 피드백(👍/👎) 저장소. 운영 PG가 아니라 임베디드 CoreDB에 보관한다.
     feedback_store: Arc<CoreDbFeedbackStore>,
+    /// "조치 완료"(개선 답변 재생성·재확인) 저장소. CoreDB.
+    resolution_store: Arc<CoreDbResolutionStore>,
+    /// 인앱 알림 저장소. CoreDB.
+    notification_store: Arc<CoreDbNotificationStore>,
     vector_store: Arc<InMemoryVectorStore>,
     episodic_store: Arc<InMemoryEpisodicStore>,
     orchestrator: Arc<RwLock<OrchestratorActor>>,
@@ -566,6 +570,8 @@ struct FeedbackStatsResponse {
     tag_counts: Vec<TagCount>,
     /// 월별 추세(YYYY-MM 오름차순).
     trend: Vec<TrendPoint>,
+    /// 조치 후 재확인 요약(조치 완료/재확인 정확/부정확).
+    resolution: ResolutionSummary,
 }
 
 #[derive(Serialize)]
@@ -597,6 +603,8 @@ struct FeedbackCommentsResponse {
 
 #[derive(Serialize)]
 struct CommentRow {
+    /// 조치(resolve) 트리거용 키.
+    feedback_key: String,
     agent_id: String,
     rating: String,
     comment: Option<String>,
@@ -604,6 +612,8 @@ struct CommentRow {
     /// 원본 대화 세션 id(빈 문자열이면 바로가기 불가).
     session_id: String,
     created_at: String,
+    /// 이미 조치 완료(알림 발송)된 건이면 true.
+    resolved: bool,
 }
 
 /// 부정 사유 고정 5종(수집 칩과 동일 순서). 통계 도넛/칩의 안정적 순서 보장.
@@ -2708,6 +2718,7 @@ async fn get_feedback_stats(
     Query(q): Query<StatsQuery>,
 ) -> Result<Json<FeedbackStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
     let period = q.period.as_deref().unwrap_or("all");
+    let company_code = auth.as_ref().map(|a| a.company_code.clone()).unwrap_or_default();
     let records = load_feedback_for_admin(&state, auth, period).await?;
 
     let mut total_up = 0i64;
@@ -2781,6 +2792,31 @@ async fn get_feedback_stats(
         .collect();
     trend.sort_by(|a, b| a.month.cmp(&b.month));
 
+    // 조치 후 재확인 요약: 회사 + 기간(resolved_at) 필터.
+    let cutoff = period_cutoff(period);
+    let mut resolution = ResolutionSummary::default();
+    if let Ok(res_list) = state.resolution_store.list_all().await {
+        for r in res_list.into_iter().filter(|r| r.company_code == company_code) {
+            let in_period = match cutoff {
+                None => true,
+                Some(c) => chrono::DateTime::parse_from_rfc3339(&r.resolved_at)
+                    .map(|dt| dt.with_timezone(&chrono::Utc) >= c)
+                    .unwrap_or(true),
+            };
+            if !in_period {
+                continue;
+            }
+            if r.status == "sent" {
+                resolution.resolved += 1;
+            }
+            match r.reverify_result.as_str() {
+                "accurate" => resolution.reverify_accurate += 1,
+                "inaccurate" => resolution.reverify_inaccurate += 1,
+                _ => {}
+            }
+        }
+    }
+
     Ok(Json(FeedbackStatsResponse {
         total_up,
         total_down,
@@ -2788,6 +2824,7 @@ async fn get_feedback_stats(
         agents,
         tag_counts,
         trend,
+        resolution,
     }))
 }
 
@@ -2802,6 +2839,17 @@ async fn get_feedback_comments(
     let offset = q.offset.unwrap_or(0).max(0) as usize;
     let records = load_feedback_for_admin(&state, auth, period).await?;
 
+    // 이미 발송(sent)된 조치 키 집합.
+    let sent_keys: HashSet<String> = state
+        .resolution_store
+        .list_all()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.status == "sent")
+        .map(|r| r.feedback_key)
+        .collect();
+
     // 👎 + 실제 코멘트 있는 항목만, 최신순.
     let mut rows: Vec<CommentRow> = records
         .into_iter()
@@ -2810,13 +2858,17 @@ async fn get_feedback_comments(
             if r.rating != "down" {
                 return None;
             }
+            let feedback_key = feedback_key_of(&r);
+            let resolved = sent_keys.contains(&feedback_key);
             Some(CommentRow {
+                feedback_key,
                 agent_id: r.agent_id,
                 rating: r.rating,
                 comment: Some(comment),
                 tags: r.tags,
                 session_id: r.session_id,
                 created_at: r.created_at,
+                resolved,
             })
         })
         .collect();
@@ -2825,6 +2877,473 @@ async fn get_feedback_comments(
     let total = rows.len() as i64;
     let items = rows.into_iter().skip(offset).take(limit).collect();
     Ok(Json(FeedbackCommentsResponse { items, total }))
+}
+
+// ============================================================================
+// 조치 완료(개선 답변) + 인앱 알림
+// ============================================================================
+
+#[derive(Deserialize)]
+struct FeedbackKeyRequest {
+    feedback_key: String,
+}
+
+#[derive(Serialize)]
+struct ResolutionViewResponse {
+    feedback_key: String,
+    agent_id: String,
+    question: String,
+    old_answer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    old_chart: Option<String>,
+    new_answer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_chart: Option<String>,
+    /// "reviewing" | "sent".
+    status: String,
+    /// "" | "accurate" | "inaccurate".
+    reverify_result: String,
+}
+
+#[derive(Serialize)]
+struct NotificationsResponse {
+    items: Vec<NotificationItem>,
+    unread: i64,
+}
+
+#[derive(Serialize)]
+struct NotificationItem {
+    id: String,
+    feedback_key: String,
+    message: String,
+    is_read: bool,
+    created_at: String,
+}
+
+#[derive(Deserialize)]
+struct ReverifyRequest {
+    /// "accurate" | "inaccurate".
+    result: String,
+    #[serde(default)]
+    comment: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ReverifyListResponse {
+    items: Vec<ReverifyRow>,
+    total: i64,
+}
+
+#[derive(Serialize)]
+struct ReverifyRow {
+    feedback_key: String,
+    agent_id: String,
+    result: String,
+    comment: Option<String>,
+    created_at: String,
+}
+
+/// 조치 후 재확인 요약(통계 KPI).
+#[derive(Serialize, Default)]
+struct ResolutionSummary {
+    resolved: i64,
+    reverify_accurate: i64,
+    reverify_inaccurate: i64,
+}
+
+/// `FeedbackRecord`로부터 feedback_key를 복원한다(저장 시와 동일 규칙).
+fn feedback_key_of(r: &pekko_agent_memory::FeedbackRecord) -> String {
+    format!("{}|{}|{}", r.session_id, r.message_id, r.response_index)
+}
+
+/// 원 질문 + 이전 답변(+차트)을 대화 기록에서 추출한다.
+async fn extract_question_and_old_answer(
+    state: &AppState,
+    rec: &pekko_agent_memory::FeedbackRecord,
+) -> Option<(String, String, Option<String>)> {
+    let sid = Uuid::parse_str(&rec.session_id).ok()?;
+    let turns = state.conversation_store.get_conversation_with_charts(&sid).await;
+    if turns.is_empty() {
+        return None;
+    }
+    // 이전 답변: content_excerpt 앞부분으로 매칭, 실패 시 마지막 assistant.
+    let excerpt = rec.content_excerpt.clone().unwrap_or_default();
+    let key_prefix: String = excerpt.chars().take(40).collect();
+    let assistant_idx = turns
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.role == "Assistant")
+        .find(|(_, t)| !key_prefix.is_empty() && t.content.contains(&key_prefix))
+        .map(|(i, _)| i)
+        .or_else(|| {
+            turns
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.role == "Assistant")
+                .last()
+                .map(|(i, _)| i)
+        })?;
+    let old = &turns[assistant_idx];
+    // 원 질문: 해당 답변 직전의 user turn, 폴백 첫 user.
+    let question = turns[..assistant_idx]
+        .iter()
+        .rev()
+        .find(|t| t.role == "User")
+        .or_else(|| turns.iter().find(|t| t.role == "User"))
+        .map(|t| t.content.clone())?;
+    Some((question, old.content.clone(), old.chart_data.clone()))
+}
+
+/// 부정 피드백을 같은 에이전트로 재실행해 개선 답변을 만든다.
+/// 반환: (question, old_answer, old_chart, new_answer, new_chart).
+async fn regenerate_improved_answer(
+    state: &AppState,
+    rec: &pekko_agent_memory::FeedbackRecord,
+) -> Result<(String, String, Option<String>, String, Option<String>), (StatusCode, Json<ErrorResponse>)> {
+    let (question, old_answer, old_chart) = extract_question_and_old_answer(state, rec)
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "원본 질문/답변을 찾을 수 없습니다.".into(),
+                    code: "NOT_FOUND".into(),
+                }),
+            )
+        })?;
+
+    // 원 사용자 신원으로 재실행(데이터 범위가 원래와 같도록). throwaway 세션 사용.
+    let identity = crate::auth::AuthIdentity {
+        employee_id: rec.employee_id.clone(),
+        company_code: rec.company_code.clone(),
+        role: "USER".to_string(),
+        name: String::new(),
+        exp: 0,
+    };
+    let new_session = Uuid::new_v4();
+    let req = QueryRequest {
+        content: question.clone(),
+        session_id: Some(new_session),
+        tenant_id: default_tenant(),
+        user_id: rec.employee_id.clone(),
+    };
+    let noop = |_: ProcessEvent| {};
+    let result = execute_agent_query(
+        state,
+        &rec.agent_id,
+        &req,
+        new_session,
+        &noop,
+        false,
+        &Some(identity),
+    )
+    .await?;
+
+    let new_chart = result
+        .chart_data
+        .as_ref()
+        .and_then(|c| serde_json::to_string(c).ok());
+    Ok((question, old_answer, old_chart, result.response, new_chart))
+}
+
+/// POST /api/admin/feedback/resolve - 부정 피드백 개선 답변 재생성(draft 저장).
+async fn resolve_feedback(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Json(req): Json<FeedbackKeyRequest>,
+) -> Result<Json<ResolutionViewResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // admin 게이팅 + 회사 격리된 레코드 로드.
+    let records = load_feedback_for_admin(&state, auth.clone(), "all").await?;
+    let admin_id = auth.as_ref().map(|a| a.employee_id.clone()).unwrap_or_default();
+    let rec = records
+        .iter()
+        .find(|r| feedback_key_of(r) == req.feedback_key)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "피드백을 찾을 수 없습니다.".into(),
+                    code: "NOT_FOUND".into(),
+                }),
+            )
+        })?;
+
+    let (question, old_answer, old_chart, new_answer, new_chart) =
+        regenerate_improved_answer(&state, rec).await?;
+    let resolved_at = chrono::Utc::now().to_rfc3339();
+    state
+        .resolution_store
+        .upsert_draft(
+            &req.feedback_key,
+            &rec.employee_id,
+            &rec.company_code,
+            &rec.agent_id,
+            &question,
+            &old_answer,
+            old_chart.as_deref(),
+            &new_answer,
+            new_chart.as_deref(),
+            &admin_id,
+            &resolved_at,
+        )
+        .await
+        .map_err(feedback_db_error)?;
+
+    Ok(Json(ResolutionViewResponse {
+        feedback_key: req.feedback_key,
+        agent_id: rec.agent_id.clone(),
+        question,
+        old_answer,
+        old_chart,
+        new_answer,
+        new_chart,
+        status: "reviewing".into(),
+        reverify_result: String::new(),
+    }))
+}
+
+/// POST /api/admin/feedback/resolve/send - 조치 확정 + 사용자 알림 생성.
+async fn send_resolution(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Json(req): Json<FeedbackKeyRequest>,
+) -> Result<Json<FeedbackResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(unauthorized_err)?;
+    if !is_feedback_admin(&identity.employee_id) {
+        return Err(forbidden_err());
+    }
+    let rec = state
+        .resolution_store
+        .get(&req.feedback_key)
+        .await
+        .map_err(feedback_db_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "조치 내역을 찾을 수 없습니다.".into(),
+                    code: "NOT_FOUND".into(),
+                }),
+            )
+        })?;
+    // 회사 격리.
+    if rec.company_code != identity.company_code {
+        return Err(forbidden_err());
+    }
+
+    state
+        .resolution_store
+        .mark_sent(&req.feedback_key)
+        .await
+        .map_err(feedback_db_error)?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let _ = state
+        .notification_store
+        .create(
+            &Uuid::new_v4().to_string(),
+            &rec.employee_id,
+            &rec.company_code,
+            &req.feedback_key,
+            "feedback_resolved",
+            "회원님이 남긴 피드백에 대한 개선 조치가 완료되었습니다.",
+            &now,
+        )
+        .await;
+
+    Ok(Json(FeedbackResponse { ok: true }))
+}
+
+/// GET /api/notifications - 본인 알림 목록 + 안읽음 수.
+async fn get_notifications(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+) -> Result<Json<NotificationsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(unauthorized_err)?;
+    let list = state
+        .notification_store
+        .list_for(&identity.employee_id)
+        .await
+        .map_err(feedback_db_error)?;
+    let unread = list.iter().filter(|n| !n.is_read).count() as i64;
+    let items = list
+        .into_iter()
+        .map(|n| NotificationItem {
+            id: n.notification_id,
+            feedback_key: n.feedback_key,
+            message: n.message,
+            is_read: n.is_read,
+            created_at: n.created_at,
+        })
+        .collect();
+    Ok(Json(NotificationsResponse { items, unread }))
+}
+
+/// POST /api/notifications/:id/read - 알림 읽음 처리(소유자).
+async fn mark_notification_read(
+    Path(notification_id): Path<String>,
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+) -> Result<Json<FeedbackResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(unauthorized_err)?;
+    state
+        .notification_store
+        .mark_read(&notification_id, &identity.employee_id)
+        .await
+        .map_err(feedback_db_error)?;
+    Ok(Json(FeedbackResponse { ok: true }))
+}
+
+/// GET /api/resolution/:feedback_key - 비교 페이지 데이터(수신자 본인 또는 admin).
+async fn get_resolution(
+    Path(feedback_key): Path<String>,
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+) -> Result<Json<ResolutionViewResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(unauthorized_err)?;
+    let rec = state
+        .resolution_store
+        .get(&feedback_key)
+        .await
+        .map_err(feedback_db_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "조치 내역을 찾을 수 없습니다.".into(),
+                    code: "NOT_FOUND".into(),
+                }),
+            )
+        })?;
+    // 수신자 본인이거나, 같은 회사 admin만 열람.
+    let is_owner = rec.employee_id == identity.employee_id;
+    let is_admin = is_feedback_admin(&identity.employee_id) && rec.company_code == identity.company_code;
+    if !is_owner && !is_admin {
+        return Err(forbidden_err());
+    }
+    Ok(Json(ResolutionViewResponse {
+        feedback_key: rec.feedback_key,
+        agent_id: rec.agent_id,
+        question: rec.question,
+        old_answer: rec.old_answer,
+        old_chart: rec.old_chart,
+        new_answer: rec.new_answer,
+        new_chart: rec.new_chart,
+        status: rec.status,
+        reverify_result: rec.reverify_result,
+    }))
+}
+
+/// POST /api/resolution/:feedback_key/reverify - 사용자 재확인 결과 기록(수신자 본인).
+async fn submit_reverify(
+    Path(feedback_key): Path<String>,
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Json(req): Json<ReverifyRequest>,
+) -> Result<Json<FeedbackResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(unauthorized_err)?;
+    if req.result != "accurate" && req.result != "inaccurate" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "result는 accurate 또는 inaccurate여야 합니다.".into(),
+                code: "BAD_REQUEST".into(),
+            }),
+        ));
+    }
+    let rec = state
+        .resolution_store
+        .get(&feedback_key)
+        .await
+        .map_err(feedback_db_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "조치 내역을 찾을 수 없습니다.".into(),
+                    code: "NOT_FOUND".into(),
+                }),
+            )
+        })?;
+    if rec.employee_id != identity.employee_id {
+        return Err(forbidden_err());
+    }
+    let comment = req
+        .comment
+        .as_deref()
+        .map(|c| truncate_chars(c.trim(), 1000))
+        .filter(|c| !c.is_empty());
+    let now = chrono::Utc::now().to_rfc3339();
+    state
+        .resolution_store
+        .set_reverify(&feedback_key, &req.result, comment.as_deref(), &now)
+        .await
+        .map_err(feedback_db_error)?;
+    Ok(Json(FeedbackResponse { ok: true }))
+}
+
+/// GET /api/admin/feedback/reverify - 부정확 재확인 목록(admin, 회사+기간 필터).
+async fn get_reverify_list(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Query(q): Query<CommentsQuery>,
+) -> Result<Json<ReverifyListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(unauthorized_err)?;
+    if !is_feedback_admin(&identity.employee_id) {
+        return Err(forbidden_err());
+    }
+    let period = q.period.as_deref().unwrap_or("all");
+    let cutoff = period_cutoff(period);
+    let limit = q.limit.unwrap_or(20).clamp(1, 100) as usize;
+    let offset = q.offset.unwrap_or(0).max(0) as usize;
+
+    let resolutions = state
+        .resolution_store
+        .list_all()
+        .await
+        .map_err(feedback_db_error)?;
+    let mut rows: Vec<ReverifyRow> = resolutions
+        .into_iter()
+        .filter(|r| r.company_code == identity.company_code)
+        .filter(|r| r.reverify_result == "inaccurate")
+        .filter(|r| match cutoff {
+            None => true,
+            Some(c) => chrono::DateTime::parse_from_rfc3339(&r.reverify_at)
+                .map(|dt| dt.with_timezone(&chrono::Utc) >= c)
+                .unwrap_or(true),
+        })
+        .map(|r| ReverifyRow {
+            feedback_key: r.feedback_key,
+            agent_id: r.agent_id,
+            result: r.reverify_result,
+            comment: r.reverify_comment,
+            created_at: r.reverify_at,
+        })
+        .collect();
+    rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let total = rows.len() as i64;
+    let items = rows.into_iter().skip(offset).take(limit).collect();
+    Ok(Json(ReverifyListResponse { items, total }))
+}
+
+/// 401/403 헬퍼.
+fn unauthorized_err() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorResponse {
+            error: "로그인이 필요합니다.".into(),
+            code: "UNAUTHORIZED".into(),
+        }),
+    )
+}
+fn forbidden_err() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+            error: "권한이 없습니다.".into(),
+            code: "FORBIDDEN".into(),
+        }),
+    )
 }
 
 /// GET /api/tools - List all available tools
@@ -2942,6 +3461,17 @@ async fn main() -> anyhow::Result<()> {
             .await
             .expect("Failed to initialize feedback store"),
     );
+    // 조치 완료(개선 답변)·인앱 알림 저장소도 같은 임베디드 CoreDB를 사용한다.
+    let resolution_store = Arc::new(
+        CoreDbResolutionStore::new(coredb.clone())
+            .await
+            .expect("Failed to initialize resolution store"),
+    );
+    let notification_store = Arc::new(
+        CoreDbNotificationStore::new(coredb.clone())
+            .await
+            .expect("Failed to initialize notification store"),
+    );
 
     // RSA keypair for login password encryption. Use LOGIN_RSA_PRIVATE_KEY (PEM) when set
     // for cross-restart / multi-instance stability; otherwise generate an ephemeral key.
@@ -3048,6 +3578,8 @@ async fn main() -> anyhow::Result<()> {
         conversation_store,
         share_store,
         feedback_store,
+        resolution_store,
+        notification_store,
         vector_store: Arc::new(InMemoryVectorStore::new()),
         episodic_store: Arc::new(InMemoryEpisodicStore::new()),
         orchestrator,
@@ -3088,6 +3620,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/feedback", post(submit_feedback))
         .route("/api/admin/feedback/stats", get(get_feedback_stats))
         .route("/api/admin/feedback/comments", get(get_feedback_comments))
+        .route("/api/admin/feedback/reverify", get(get_reverify_list))
+        .route("/api/admin/feedback/resolve", post(resolve_feedback))
+        .route("/api/admin/feedback/resolve/send", post(send_resolution))
+        .route("/api/notifications", get(get_notifications))
+        .route("/api/notifications/:id/read", post(mark_notification_read))
+        .route("/api/resolution/:feedback_key", get(get_resolution))
+        .route("/api/resolution/:feedback_key/reverify", post(submit_reverify))
         .route("/api/tools", get(list_tools))
         .layer(build_cors_layer())
         .layer(TraceLayer::new_for_http())

@@ -565,6 +565,8 @@ pub struct FeedbackStatsResponse {
     pub agents: Vec<AgentRate>,
     pub tag_counts: Vec<TagCount>,
     pub trend: Vec<TrendPoint>,
+    #[serde(default)]
+    pub resolution: ResolutionSummary,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -587,6 +589,68 @@ pub struct TrendPoint {
     pub down: i64,
 }
 
+/// 조치 후 재확인 요약(통계 KPI).
+#[derive(Clone, Debug, PartialEq, Deserialize, Default)]
+pub struct ResolutionSummary {
+    pub resolved: i64,
+    pub reverify_accurate: i64,
+    pub reverify_inaccurate: i64,
+}
+
+/// 비교 페이지(이전/개선 답변) 데이터.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct ResolutionView {
+    pub feedback_key: String,
+    pub agent_id: String,
+    pub question: String,
+    pub old_answer: String,
+    #[serde(default)]
+    pub old_chart: Option<String>,
+    pub new_answer: String,
+    #[serde(default)]
+    pub new_chart: Option<String>,
+    /// "reviewing" | "sent".
+    pub status: String,
+    /// "" | "accurate" | "inaccurate".
+    #[serde(default)]
+    pub reverify_result: String,
+}
+
+/// 인앱 알림 1건.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct NotificationItem {
+    pub id: String,
+    pub feedback_key: String,
+    pub message: String,
+    pub is_read: bool,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Default)]
+pub struct NotificationsResponse {
+    #[serde(default)]
+    pub items: Vec<NotificationItem>,
+    #[serde(default)]
+    pub unread: i64,
+}
+
+/// 부정확 재확인 목록 행.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct ReverifyRow {
+    pub feedback_key: String,
+    pub agent_id: String,
+    pub result: String,
+    #[serde(default)]
+    pub comment: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct ReverifyListResponse {
+    pub items: Vec<ReverifyRow>,
+    pub total: i64,
+}
+
 /// `GET /api/admin/feedback/comments` 응답(페이지네이션).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct FeedbackCommentsResponse {
@@ -596,6 +660,8 @@ pub struct FeedbackCommentsResponse {
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct CommentRow {
+    #[serde(default)]
+    pub feedback_key: String,
     pub agent_id: String,
     pub rating: String,
     #[serde(default)]
@@ -606,6 +672,8 @@ pub struct CommentRow {
     #[serde(default)]
     pub session_id: String,
     pub created_at: String,
+    #[serde(default)]
+    pub resolved: bool,
 }
 
 /// `POST /api/feedback` 요청. 답변 1개(특정 버전)에 대한 👍/👎 평가.

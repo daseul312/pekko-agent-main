@@ -434,6 +434,140 @@ pub async fn fetch_feedback_comments(
     }
 }
 
+/// GET /api/admin/feedback/reverify — 부정확 재확인 목록(admin).
+pub async fn fetch_reverify_list(
+    period: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<ReverifyListResponse, FeedbackStatsError> {
+    let url = api_url(&format!(
+        "/api/admin/feedback/reverify?period={period}&limit={limit}&offset={offset}"
+    ));
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| FeedbackStatsError::Other(format!("Network error: {e}")))?;
+    match resp.status() {
+        200 => resp
+            .json::<ReverifyListResponse>()
+            .await
+            .map_err(|e| FeedbackStatsError::Other(format!("Parse error: {e}"))),
+        401 => Err(FeedbackStatsError::Unauthorized),
+        403 => Err(FeedbackStatsError::Forbidden),
+        status => Err(FeedbackStatsError::Other(format!("HTTP {status}"))),
+    }
+}
+
+/// POST /api/admin/feedback/resolve — 개선 답변 재생성(admin). 느릴 수 있음(LLM 호출).
+pub async fn resolve_feedback(feedback_key: &str) -> Result<ResolutionView, FeedbackStatsError> {
+    let url = api_url("/api/admin/feedback/resolve");
+    let body = serde_json::json!({ "feedback_key": feedback_key });
+    let resp = with_credentials(Request::post(&url))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .map_err(|e| FeedbackStatsError::Other(format!("Serialize error: {e}")))?
+        .send()
+        .await
+        .map_err(|e| FeedbackStatsError::Other(format!("Network error: {e}")))?;
+    match resp.status() {
+        200 => resp
+            .json::<ResolutionView>()
+            .await
+            .map_err(|e| FeedbackStatsError::Other(format!("Parse error: {e}"))),
+        401 => Err(FeedbackStatsError::Unauthorized),
+        403 => Err(FeedbackStatsError::Forbidden),
+        status => Err(FeedbackStatsError::Other(format!("HTTP {status}"))),
+    }
+}
+
+/// POST /api/admin/feedback/resolve/send — 조치 확정 + 사용자 알림(admin).
+pub async fn send_resolution(feedback_key: &str) -> Result<(), String> {
+    let url = api_url("/api/admin/feedback/resolve/send");
+    let body = serde_json::json!({ "feedback_key": feedback_key });
+    let resp = with_credentials(Request::post(&url))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .map_err(|e| format!("Serialize error: {e}"))?
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(format!("HTTP {}", resp.status()))
+    }
+}
+
+/// GET /api/resolution/:feedback_key — 비교 페이지 데이터(수신자/admin).
+pub async fn fetch_resolution(feedback_key: &str) -> Result<ResolutionView, FeedbackStatsError> {
+    let url = api_url(&format!("/api/resolution/{feedback_key}"));
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| FeedbackStatsError::Other(format!("Network error: {e}")))?;
+    match resp.status() {
+        200 => resp
+            .json::<ResolutionView>()
+            .await
+            .map_err(|e| FeedbackStatsError::Other(format!("Parse error: {e}"))),
+        401 => Err(FeedbackStatsError::Unauthorized),
+        403 => Err(FeedbackStatsError::Forbidden),
+        status => Err(FeedbackStatsError::Other(format!("HTTP {status}"))),
+    }
+}
+
+/// POST /api/resolution/:feedback_key/reverify — 사용자 재확인 제출.
+pub async fn submit_reverify(
+    feedback_key: &str,
+    result: &str,
+    comment: Option<&str>,
+) -> Result<(), String> {
+    let url = api_url(&format!("/api/resolution/{feedback_key}/reverify"));
+    let body = serde_json::json!({ "result": result, "comment": comment });
+    let resp = with_credentials(Request::post(&url))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .map_err(|e| format!("Serialize error: {e}"))?
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(format!("HTTP {}", resp.status()))
+    }
+}
+
+/// GET /api/notifications — 본인 알림 목록 + 안읽음 수.
+pub async fn fetch_notifications() -> Result<NotificationsResponse, String> {
+    let url = api_url("/api/notifications");
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+    if resp.ok() {
+        resp.json::<NotificationsResponse>()
+            .await
+            .map_err(|e| format!("Parse error: {e}"))
+    } else {
+        Err(format!("HTTP {}", resp.status()))
+    }
+}
+
+/// POST /api/notifications/:id/read — 알림 읽음.
+pub async fn mark_notification_read(id: &str) -> Result<(), String> {
+    let url = api_url(&format!("/api/notifications/{id}/read"));
+    let resp = with_credentials(Request::post(&url))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(format!("HTTP {}", resp.status()))
+    }
+}
+
 /// POST /api/query/stream — smart-router query with live NDJSON progress events.
 ///
 /// Calls `on_event` for each `ProcessEvent` as it arrives from the backend and

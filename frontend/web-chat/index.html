@@ -3285,6 +3285,208 @@
         font-weight: 600;
       }
 
+      /* 헤더 알림 종 + 드롭다운 */
+      .notif-wrap { position: relative; display: flex; align-items: center; }
+      .notif-bell {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 38px;
+        height: 38px;
+        border-radius: 10px;
+        border: none;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .notif-bell:hover { background: var(--accent-soft); color: var(--accent); }
+      .notif-badge {
+        position: absolute;
+        top: 4px;
+        right: 3px;
+        min-width: 16px;
+        height: 16px;
+        padding: 0 4px;
+        border-radius: 999px;
+        background: #dc4f4f;
+        color: #fff;
+        font-size: 10px;
+        font-weight: 700;
+        line-height: 16px;
+        text-align: center;
+      }
+      .notif-dropdown {
+        position: absolute;
+        top: 46px;
+        right: 0;
+        width: 320px;
+        max-height: 420px;
+        overflow-y: auto;
+        background: var(--chat-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
+        z-index: 50;
+        padding: 6px;
+      }
+      .notif-empty { padding: 22px; text-align: center; color: var(--muted); font-size: 13px; }
+      .notif-item {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        width: 100%;
+        text-align: left;
+        padding: 10px 12px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        cursor: pointer;
+        transition: background 0.15s ease;
+      }
+      .notif-item:hover { background: var(--accent-soft); }
+      .notif-item.unread { background: rgba(96, 165, 250, 0.08); }
+      .notif-item-msg { font-size: 13px; color: var(--text); }
+      .notif-item-date { font-size: 11px; color: var(--muted); }
+
+      /* 개선 답변 비교 페이지 */
+      .resolution-question {
+        width: 100%;
+        max-width: 1040px;
+        background: var(--chat-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 14px 18px;
+        display: flex;
+        gap: 10px;
+        align-items: baseline;
+      }
+      .resolution-question-label {
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--accent);
+        flex-shrink: 0;
+      }
+      .resolution-cols {
+        width: 100%;
+        max-width: 1040px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+      .resolution-col {
+        background: var(--chat-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 18px 20px;
+      }
+      .resolution-col-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--muted);
+        margin-bottom: 12px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid var(--border);
+      }
+      .resolution-actions {
+        width: 100%;
+        max-width: 1040px;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .resolution-note { font-size: 12px; color: var(--muted); margin-right: auto; }
+      .resolution-send-btn {
+        font-size: 13px;
+        font-weight: 600;
+        padding: 9px 18px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: #fff;
+        cursor: pointer;
+        transition: opacity 0.15s ease;
+      }
+      .resolution-send-btn:hover { opacity: 0.88; }
+      .resolution-regen-btn {
+        font-size: 13px;
+        padding: 9px 16px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+      }
+      .resolution-regen-btn:hover { border-color: var(--accent); color: var(--accent); }
+      .resolution-reverify {
+        width: 100%;
+        max-width: 1040px;
+        background: var(--chat-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 18px 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        align-items: center;
+      }
+      .resolution-reverify-q { font-size: 15px; font-weight: 700; color: var(--text); }
+      .resolution-reverify-btns { display: flex; gap: 12px; }
+      .resolution-accurate, .resolution-inaccurate {
+        font-size: 14px;
+        font-weight: 600;
+        padding: 10px 22px;
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        border: 1px solid var(--border);
+        background: transparent;
+        transition: all 0.15s ease;
+      }
+      .resolution-accurate { color: #16a34a; }
+      .resolution-accurate:hover { background: rgba(22,163,74,0.12); border-color: #16a34a; }
+      .resolution-inaccurate { color: #dc4f4f; }
+      .resolution-inaccurate:hover { background: rgba(220,80,80,0.12); border-color: #dc4f4f; }
+      .resolution-reverify-box {
+        width: 100%;
+        max-width: 480px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .resolution-thanks {
+        width: 100%;
+        max-width: 1040px;
+        text-align: center;
+        font-size: 14px;
+        color: var(--accent);
+        padding: 16px;
+        background: var(--accent-soft);
+        border-radius: var(--radius-lg);
+      }
+
+      /* 대시보드: 조치 완료 버튼/배지, 조치 후 재확인 */
+      .fb-resolve-btn {
+        font-size: 11px;
+        font-weight: 600;
+        padding: 4px 10px;
+        border-radius: var(--radius-sm);
+        border: 1px solid #16a34a;
+        background: rgba(22,163,74,0.08);
+        color: #16a34a;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .fb-resolve-btn:hover { background: rgba(22,163,74,0.16); }
+      .fb-resolved-badge { font-size: 11px; font-weight: 600; color: #16a34a; white-space: nowrap; }
+      .fb-reverify-kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 16px; }
+      .fb-subsection-title { font-size: 13px; font-weight: 600; color: var(--muted); margin: 4px 0 10px; }
+      @media (max-width: 760px) {
+        .resolution-cols { grid-template-columns: 1fr; }
+        .fb-reverify-kpis { grid-template-columns: 1fr; }
+      }
+
       /* 사이드바 피드백 통계 진입 버튼 */
       .sidebar-feedback-stats {
         display: flex;

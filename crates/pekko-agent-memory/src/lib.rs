@@ -8,6 +8,8 @@ pub mod coredb_episodic;
 pub mod coredb_journal;
 pub mod coredb_share;
 pub mod coredb_feedback;
+pub mod coredb_resolution;
+pub mod coredb_notification;
 
 pub use conversation::*;
 pub use vector_store::*;
@@ -19,3 +21,5 @@ pub use coredb_episodic::CoreDbEpisodicStore;
 pub use coredb_journal::{CoreDbJournal, CoreDbSnapshotStore};
 pub use coredb_share::{CoreDbShareStore, SharedAnswerRecord};
 pub use coredb_feedback::{CoreDbFeedbackStore, FeedbackRecord};
+pub use coredb_resolution::{CoreDbResolutionStore, ResolutionRecord};
+pub use coredb_notification::{CoreDbNotificationStore, NotificationRecord};

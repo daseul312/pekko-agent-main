@@ -12,7 +12,7 @@ use crate::api;
 use crate::components::chart::ChartBlock;
 use crate::types::{
     AgentMeta, AgentRate, ChartData, ChartSeries, CommentRow, FeedbackStatsError,
-    FeedbackStatsResponse, TagCount, TrendPoint,
+    FeedbackStatsResponse, ReverifyRow, TagCount, TrendPoint,
 };
 
 const COMMENTS_PAGE: i64 = 20;
@@ -149,6 +149,23 @@ fn comment_row(row: &CommentRow) -> Html {
         });
         html! { <button class="fb-goto-btn" onclick={on_goto} title="이 답변이 나온 대화 보기">{ "💬 바로가기" }</button> }
     };
+    // 조치 완료 버튼 / 이미 조치된 건은 배지. feedback_key 없으면 미표시.
+    let resolve = if row.feedback_key.is_empty() {
+        html! {}
+    } else if row.resolved {
+        html! { <span class="fb-resolved-badge">{ "✅ 조치 완료됨" }</span> }
+    } else {
+        let key = row.feedback_key.clone();
+        let on_resolve = Callback::from(move |_: MouseEvent| {
+            if let Some(window) = web_sys::window() {
+                let enc = String::from(js_sys::encode_uri_component(&key));
+                let loc = window.location();
+                let _ = loc.set_hash(&format!("#/admin/resolution/{enc}"));
+                let _ = loc.reload();
+            }
+        });
+        html! { <button class="fb-resolve-btn" onclick={on_resolve} title="개선 답변 생성 후 사용자에게 알림">{ "✅ 조치 완료" }</button> }
+    };
     html! {
         <div class="fb-comment-row">
             <div class="fb-comment-agent">{ agent_display_name(&row.agent_id) }</div>
@@ -159,6 +176,34 @@ fn comment_row(row: &CommentRow) -> Html {
             <div class="fb-comment-aside">
                 <span class="fb-comment-date">{ date }</span>
                 { goto }
+                { resolve }
+            </div>
+        </div>
+    }
+}
+
+/// 부정확 재확인 행(조치 후 재확인 섹션).
+fn reverify_row(row: &ReverifyRow) -> Html {
+    let date: String = row.created_at.chars().take(10).collect();
+    let comment = row.comment.clone().unwrap_or_default();
+    let key = row.feedback_key.clone();
+    let on_goto = Callback::from(move |_: MouseEvent| {
+        if let Some(window) = web_sys::window() {
+            let enc = String::from(js_sys::encode_uri_component(&key));
+            let loc = window.location();
+            let _ = loc.set_hash(&format!("#/resolution/{enc}"));
+            let _ = loc.reload();
+        }
+    });
+    html! {
+        <div class="fb-comment-row">
+            <div class="fb-comment-agent">{ agent_display_name(&row.agent_id) }</div>
+            <div class="fb-comment-body">
+                <div class="fb-comment-text">{ if comment.is_empty() { "(코멘트 없음)".to_string() } else { comment } }</div>
+            </div>
+            <div class="fb-comment-aside">
+                <span class="fb-comment-date">{ date }</span>
+                <button class="fb-goto-btn" onclick={on_goto} title="개선 답변 비교 보기">{ "🔍 비교 보기" }</button>
             </div>
         </div>
     }
@@ -172,18 +217,21 @@ pub fn admin_feedback() -> Html {
     let comments = use_state(Vec::<CommentRow>::new);
     let comments_total = use_state(|| 0i64);
     let loading_more = use_state(|| false);
+    let reverify = use_state(Vec::<ReverifyRow>::new);
 
-    // 기간 변경 시 통계 + 코멘트 1페이지 재조회.
+    // 기간 변경 시 통계 + 코멘트 1페이지 + 부정확 재확인 목록 재조회.
     {
         let stats = stats.clone();
         let comments = comments.clone();
         let comments_total = comments_total.clone();
+        let reverify = reverify.clone();
         let period_val = (*period).clone();
         use_effect_with(period_val.clone(), move |p| {
             let p = p.clone();
             stats.set(StatsView::Loading);
             comments.set(Vec::new());
             comments_total.set(0);
+            reverify.set(Vec::new());
             spawn_local(async move {
                 match api::fetch_feedback_stats(&p).await {
                     Ok(s) => stats.set(StatsView::Loaded(s)),
@@ -192,6 +240,9 @@ pub fn admin_feedback() -> Html {
                 if let Ok(c) = api::fetch_feedback_comments(&p, COMMENTS_PAGE, 0).await {
                     comments.set(c.items);
                     comments_total.set(c.total);
+                }
+                if let Ok(rv) = api::fetch_reverify_list(&p, 50, 0).await {
+                    reverify.set(rv.items);
                 }
             });
             || ()
@@ -326,6 +377,18 @@ pub fn admin_feedback() -> Html {
                 }
             };
 
+            // 조치 후 재확인 섹션.
+            let res = &s.resolution;
+            let reverify_block = if reverify.is_empty() {
+                html! { <div class="fb-empty">{ "부정확으로 재확인된 건이 없습니다" }</div> }
+            } else {
+                html! {
+                    <div class="fb-comments-table">
+                        { for reverify.iter().map(reverify_row) }
+                    </div>
+                }
+            };
+
             html! {
                 <>
                     { kpis }
@@ -347,6 +410,16 @@ pub fn admin_feedback() -> Html {
                     <section class="fb-section">
                         <h3 class="fb-section-title">{ "최근 부정 코멘트" }</h3>
                         { comments_block }
+                    </section>
+                    <section class="fb-section">
+                        <h3 class="fb-section-title">{ "조치 후 재확인" }</h3>
+                        <div class="fb-reverify-kpis">
+                            { kpi_card(res.resolved.to_string(), "조치 완료") }
+                            { kpi_card(res.reverify_accurate.to_string(), "재확인 정확") }
+                            { kpi_card(res.reverify_inaccurate.to_string(), "재확인 부정확") }
+                        </div>
+                        <h4 class="fb-subsection-title">{ "부정확 재피드백" }</h4>
+                        { reverify_block }
                     </section>
                 </>
             }

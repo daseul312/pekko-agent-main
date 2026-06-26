@@ -1019,6 +1019,8 @@ fn app() -> Html {
     let active_routed_agent_ids = use_state(Vec::<String>::new);
     // 로그인 신원은 HttpOnly 쿠키가 보유하며, 표시용 상태만 메모리에 둔다(새로고침 시 초기화).
     let auth_user = use_state(|| Option::<AuthUser>::None);
+    // 인앱 알림(헤더 종). 로그인 시 주기 폴링으로 갱신한다.
+    let notifications = use_state(types::NotificationsResponse::default);
     let is_login_modal_open = use_state(|| false);
     let login_id = use_state(String::new);
     let login_password = use_state(String::new);
@@ -1099,6 +1101,50 @@ fn app() -> Html {
             || ()
         });
     }
+
+    // 인앱 알림 폴링: 로그인 상태가 되면 30초 간격으로 조회, 로그아웃 시 중단·초기화.
+    {
+        let notifications = notifications.clone();
+        let logged_in = auth_user.is_some();
+        use_effect_with(logged_in, move |logged_in| {
+            let alive = std::rc::Rc::new(std::cell::Cell::new(true));
+            if *logged_in {
+                let notifications = notifications.clone();
+                let alive2 = alive.clone();
+                spawn_local(async move {
+                    loop {
+                        if !alive2.get() {
+                            break;
+                        }
+                        if let Ok(n) = api::fetch_notifications().await {
+                            notifications.set(n);
+                        }
+                        gloo_timers::future::TimeoutFuture::new(30_000).await;
+                    }
+                });
+            } else {
+                notifications.set(types::NotificationsResponse::default());
+            }
+            move || alive.set(false)
+        });
+    }
+
+    // 알림 클릭: 읽음 처리 후 개선 답변 비교 페이지로 이동.
+    let on_notification_click = {
+        Callback::from(move |item: types::NotificationItem| {
+            let id = item.id.clone();
+            let key = item.feedback_key.clone();
+            spawn_local(async move {
+                let _ = api::mark_notification_read(&id).await;
+                if let Some(window) = web_sys::window() {
+                    let enc = String::from(js_sys::encode_uri_component(&key));
+                    let loc = window.location();
+                    let _ = loc.set_hash(&format!("#/resolution/{enc}"));
+                    let _ = loc.reload();
+                }
+            });
+        })
+    };
 
     // 현재 보고 있는 세션 id를 ref에 미러링(폴러의 stale 핸들 문제 회피).
     {
@@ -2188,6 +2234,9 @@ fn app() -> Html {
                         auth_user={(*auth_user).clone()}
                         on_login_click={on_login_click.clone()}
                         on_logout={on_logout.clone()}
+                        notifications={(*notifications).items.clone()}
+                        unread={(*notifications).unread}
+                        on_notification_click={on_notification_click.clone()}
                         is_answering={answering}
                         on_back_to_agents={header_back_to_agents.clone()}
                     />
@@ -2224,6 +2273,9 @@ fn app() -> Html {
                         auth_user={(*auth_user).clone()}
                         on_login_click={on_login_click.clone()}
                         on_logout={on_logout.clone()}
+                        notifications={(*notifications).items.clone()}
+                        unread={(*notifications).unread}
+                        on_notification_click={on_notification_click.clone()}
                         is_answering={answering}
                     />
                     <ChatArea
@@ -2259,6 +2311,9 @@ fn app() -> Html {
                         auth_user={(*auth_user).clone()}
                         on_login_click={on_login_click.clone()}
                         on_logout={on_logout.clone()}
+                        notifications={(*notifications).items.clone()}
+                        unread={(*notifications).unread}
+                        on_notification_click={on_notification_click.clone()}
                         is_answering={answering}
                     />
                     <div class="home-main">
@@ -2694,6 +2749,27 @@ fn current_admin_session_id() -> Option<String> {
     }
 }
 
+/// 현재 URL 해시가 개선 답변 비교 페이지면 `(feedback_key, admin?)`를 돌려준다.
+/// `#/admin/resolution/{key}`=admin(재생성·검토), `#/resolution/{key}`=사용자(재확인).
+/// feedback_key에는 `|`가 들어가므로 URL 인코딩된 채 마지막 조각에서 디코드한다.
+fn current_resolution_route() -> Option<(String, bool)> {
+    let window = web_sys::window()?;
+    let hash = window.location().hash().ok()?;
+    let (rest, admin) = if let Some(r) = hash.strip_prefix("#/admin/resolution/") {
+        (r, true)
+    } else if let Some(r) = hash.strip_prefix("#/resolution/") {
+        (r, false)
+    } else {
+        return None;
+    };
+    let raw = rest.trim_end_matches('/');
+    if raw.is_empty() {
+        return None;
+    }
+    let key = String::from(js_sys::decode_uri_component(raw).ok()?);
+    Some((key, admin))
+}
+
 fn main() {
     wasm_logger::init(wasm_logger::Config::default());
     // 해시 경로별 전용 페이지 분기(라우터 미사용, 순차 체크).
@@ -2705,6 +2781,10 @@ fn main() {
         // `/admin/session/{id}` — 읽기전용 대화 뷰어(피드백 바로가기 대상).
         let props = components::session_view::SessionViewProps { session_id };
         yew::Renderer::<components::session_view::SessionView>::with_props(props).render();
+    } else if let Some((feedback_key, admin)) = current_resolution_route() {
+        // `/(admin/)resolution/{key}` — 개선 답변 비교 페이지.
+        let props = components::resolution_view::ResolutionViewProps { feedback_key, admin };
+        yew::Renderer::<components::resolution_view::ResolutionView>::with_props(props).render();
     } else if is_admin_feedback_route() {
         // `/admin/feedback` — 피드백 통계(관리자) 페이지.
         yew::Renderer::<components::admin_feedback::AdminFeedback>::new().render();
