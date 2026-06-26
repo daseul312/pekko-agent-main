@@ -1,3 +1,4 @@
+use uuid::Uuid;
 use web_sys::{Element, ScrollBehavior, ScrollIntoViewOptions};
 use yew::prelude::*;
 
@@ -41,6 +42,9 @@ pub struct ChatProps {
     pub on_login_click: Callback<()>,
     #[prop_or_default]
     pub token: Option<String>,
+    /// 현재 세션 id(답변 공유 레코드 추적용 메타데이터).
+    #[prop_or_default]
+    pub session_id: Option<Uuid>,
 }
 
 /// 에이전트별 시작화면 예시질문 목록. welcome 분기 렌더와 "예시 출처 판정"(⭐ 노출 조건)에
@@ -300,6 +304,8 @@ pub fn chat_area(props: &ChatProps) -> Html {
                                 can_favorite={can_favorite}
                                 regenerate_disabled={props.is_loading}
                                 token={props.token.clone()}
+                                session_id={props.session_id}
+                                is_authenticated={props.is_authenticated}
                             />
                         }
                     })}

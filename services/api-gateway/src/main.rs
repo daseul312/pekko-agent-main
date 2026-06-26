@@ -481,6 +481,38 @@ struct ErrorResponse {
     code: String,
 }
 
+/// POST /api/share 요청. 프론트가 보유한 답변 본문을 스냅샷으로 보낸다
+/// (CoreDB 메시지에는 안정적 id가 없어 message_id로 재조회가 불가능하므로).
+#[derive(Deserialize)]
+struct ShareCreateRequest {
+    /// 공유할 답변 본문(마크다운). 공유 시점 스냅샷으로 저장된다.
+    content: String,
+    /// 추적용 메타데이터(없어도 동작).
+    #[serde(default)]
+    session_id: Option<Uuid>,
+    /// 프론트의 클라이언트측 message id(추적용).
+    #[serde(default)]
+    message_id: Option<String>,
+    /// 차트(ChartData) JSON 문자열. 그래프가 있는 답변일 때만 채워진다(불투명 저장).
+    #[serde(default)]
+    chart_data: Option<String>,
+}
+
+/// POST /api/share 응답.
+#[derive(Serialize)]
+struct ShareCreateResponse {
+    share_url: String,
+}
+
+/// GET /api/share/:share_id 응답.
+#[derive(Serialize)]
+struct SharedAnswerResponse {
+    content: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chart_data: Option<String>,
+}
+
 /// Build the system prompt based on the selected agent.
 ///
 /// When `identity` is `Some`, the logged-in employee's scope is injected so the LLM
@@ -2215,6 +2247,118 @@ async fn summarize_session(
     Ok(Json(SummarizeResponse { title }))
 }
 
+/// POST /api/share - 답변 1개를 공유 링크로 만든다.
+///
+/// 로그인 필수(세션 쿠키). 공유 시점의 답변 본문을 스냅샷으로 저장하고
+/// 생성자의 회사코드를 함께 기록한다(같은 회사 사용자만 열람 가능).
+async fn create_share(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Json(req): Json<ShareCreateRequest>,
+) -> Result<Json<ShareCreateResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "로그인이 필요합니다.".into(),
+                code: "UNAUTHORIZED".into(),
+            }),
+        )
+    })?;
+
+    let share_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO public."ShareLink" (id, content, "companyCode", "sessionId", "messageId", "chartData")
+           VALUES ($1, $2, $3, $4, $5, $6)"#,
+    )
+    .bind(share_id)
+    .bind(&req.content)
+    .bind(&identity.company_code)
+    .bind(req.session_id)
+    .bind(&req.message_id)
+    .bind(&req.chart_data)
+    .execute(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| {
+        error!(error = %e, "공유 링크 저장 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("공유 링크 생성 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let base = std::env::var("SHARE_BASE_URL")
+        .unwrap_or_else(|_| "https://ai.safetyone.io".to_string());
+    let base = base.trim_end_matches('/');
+    Ok(Json(ShareCreateResponse {
+        // 해시 라우팅(`/#/share/{id}`): 해시는 서버로 전송되지 않아 nginx 폴백 설정이 불필요하다.
+        share_url: format!("{base}/#/share/{share_id}"),
+    }))
+}
+
+/// GET /api/share/:share_id - 공유된 답변을 조회한다.
+///
+/// 로그인 필수(401). 공유 레코드의 회사코드가 요청자와 같을 때만 200을 반환하고,
+/// 다르면 403, 없으면 404.
+async fn get_share(
+    Path(share_id): Path<Uuid>,
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+) -> Result<Json<SharedAnswerResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "로그인이 필요합니다.".into(),
+                code: "UNAUTHORIZED".into(),
+            }),
+        )
+    })?;
+
+    let row = sqlx::query_as::<_, (String, String, chrono::DateTime<chrono::Utc>, Option<String>)>(
+        r#"SELECT content, "companyCode", "createdAt", "chartData"
+           FROM public."ShareLink" WHERE id = $1"#,
+    )
+    .bind(share_id)
+    .fetch_optional(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| {
+        error!(error = %e, "공유 답변 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("공유 답변 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let (content, company_code, created_at, chart_data) = row.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "공유된 답변을 찾을 수 없습니다.".into(),
+                code: "NOT_FOUND".into(),
+            }),
+        )
+    })?;
+
+    if company_code != identity.company_code {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "같은 회사 계정으로 로그인해야 열람 가능합니다.".into(),
+                code: "FORBIDDEN".into(),
+            }),
+        ));
+    }
+
+    Ok(Json(SharedAnswerResponse { content, created_at, chart_data }))
+}
+
 /// GET /api/tools - List all available tools
 async fn list_tools(State(state): State<AppState>) -> impl IntoResponse {
     let registry = state.tool_registry.read().await;
@@ -2298,6 +2442,30 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Connected to PostgreSQL database");
     let pg_pool = Arc::new(pg_pool);
+
+    // 답변 공유 링크 저장 테이블. 멱등 생성(없을 때만). `expiresAt`은 차기 만료 기능을
+    // 위해 미리 nullable로 둔다 — 첫 버전에선 항상 NULL이며 만료 검사를 하지 않는다.
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS public."ShareLink" (
+            id uuid PRIMARY KEY,
+            content text NOT NULL,
+            "companyCode" varchar(50) NOT NULL,
+            "sessionId" uuid,
+            "messageId" text,
+            "createdAt" timestamptz NOT NULL DEFAULT now(),
+            "expiresAt" timestamptz NULL,
+            "chartData" text NULL
+        )"#,
+    )
+    .execute(pg_pool.as_ref())
+    .await
+    .expect("Failed to ensure ShareLink table exists");
+
+    // 이미 만들어진 테이블에도 차트 컬럼을 보장(멱등). 답변에 그래프가 있으면 함께 저장한다.
+    sqlx::query(r#"ALTER TABLE public."ShareLink" ADD COLUMN IF NOT EXISTS "chartData" text NULL"#)
+        .execute(pg_pool.as_ref())
+        .await
+        .expect("Failed to ensure ShareLink.chartData column exists");
 
     // 임베디드 coreDB: 사용자별 일일 토큰 사용량을 영구 저장한다(PostgreSQL 테이블 불필요).
     let coredb_dir = std::path::PathBuf::from(
@@ -2457,6 +2625,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/agents/:agent_id/query/stream", post(query_agent_stream))
         .route("/api/sessions/:session_id/history", get(get_session_history))
         .route("/api/sessions/:session_id/summarize", get(summarize_session))
+        .route("/api/share", post(create_share))
+        .route("/api/share/:share_id", get(get_share))
         .route("/api/tools", get(list_tools))
         .layer(build_cors_layer())
         .layer(TraceLayer::new_for_http())

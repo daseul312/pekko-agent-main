@@ -1052,10 +1052,25 @@ fn app() -> Html {
     // 있으므로, 마운트 시 /auth/me를 호출해 로그인 사용자를 되살린다. 비로그인이면 아무 것도 하지 않는다.
     {
         let auth_user = auth_user.clone();
+        let is_login_modal_open = is_login_modal_open.clone();
         use_effect_with((), move |_| {
             spawn_local(async move {
-                if let Ok(Some(user)) = api::fetch_me().await {
-                    auth_user.set(Some(user));
+                match api::fetch_me().await {
+                    Ok(Some(user)) => {
+                        auth_user.set(Some(user));
+                        // 이미 로그인 상태로 공유 복귀 경로(`?next=/share/...`)가 있으면 바로 이동.
+                        if let Some(next) = pending_share_next() {
+                            if let Some(window) = web_sys::window() {
+                                let _ = window.location().set_href(&next);
+                            }
+                        }
+                    }
+                    _ => {
+                        // 비로그인인데 공유 링크 401→로그인 유도로 넘어왔다면 로그인 모달을 자동으로 연다.
+                        if pending_share_next().is_some() {
+                            is_login_modal_open.set(true);
+                        }
+                    }
                 }
             });
             || ()
@@ -1211,6 +1226,12 @@ fn app() -> Html {
                         login_error.set(None);
                         is_login_modal_open.set(false);
                         login_password.set(String::new());
+                        // 공유 링크에서 로그인 유도로 넘어온 경우, 성공 후 원래 링크로 복귀한다.
+                        if let Some(next) = pending_share_next() {
+                            if let Some(window) = web_sys::window() {
+                                let _ = window.location().set_href(&next);
+                            }
+                        }
                     }
                     Err(e) => {
                         login_error.set(Some(e));
@@ -2096,6 +2117,7 @@ fn app() -> Html {
                         is_authenticated={auth_user.is_some()}
                         on_login_click={on_login_click.clone()}
                         token={None::<String>}
+                        session_id={*session_id}
                     />
                 } else if *is_loading || !messages.is_empty() {
                     <ChatHeader
@@ -2129,6 +2151,7 @@ fn app() -> Html {
                         is_authenticated={auth_user.is_some()}
                         on_login_click={on_login_click.clone()}
                         token={None::<String>}
+                        session_id={*session_id}
                     />
                 } else {
                     <ChatHeader
@@ -2512,7 +2535,50 @@ fn extract_suggestions(user_content: &str, response_content: &str) -> Option<Vec
 
     None
 }
+/// 공유 링크 401→로그인 유도로 진입했을 때, 로그인 성공 후 복귀할 `?next=` 경로를 읽는다.
+/// 오픈 리다이렉트를 막기 위해 해시 공유 경로(`/#/share/`)로 시작하는 값만 허용한다.
+fn pending_share_next() -> Option<String> {
+    let window = web_sys::window()?;
+    let search = window.location().search().ok()?;
+    let query = search.strip_prefix('?').unwrap_or(&search);
+    for pair in query.split('&') {
+        let mut it = pair.splitn(2, '=');
+        let key = it.next()?;
+        if key == "next" {
+            let raw = it.next().unwrap_or("");
+            let decoded = js_sys::decode_uri_component(raw)
+                .ok()
+                .map(String::from)
+                .unwrap_or_else(|| raw.to_string());
+            if decoded.starts_with("/#/share/") {
+                return Some(decoded);
+            }
+        }
+    }
+    None
+}
+
+/// 현재 URL 해시가 `#/share/{id}`면 그 share_id를 돌려준다(공유 열람 페이지 분기용).
+/// 해시 라우팅이라 서버 폴백 설정 없이 동작한다.
+fn current_share_id() -> Option<String> {
+    let window = web_sys::window()?;
+    let hash = window.location().hash().ok()?;
+    let rest = hash.strip_prefix("#/share/")?;
+    let id = rest.trim_end_matches('/');
+    if id.is_empty() || id.contains('/') {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
 fn main() {
     wasm_logger::init(wasm_logger::Config::default());
-    yew::Renderer::<App>::new().render();
+    // `/share/{id}` 경로면 전용 열람 페이지를, 그 외에는 기존 앱을 렌더한다(라우터 미사용).
+    if let Some(share_id) = current_share_id() {
+        let props = components::share_view::ShareViewProps { share_id };
+        yew::Renderer::<components::share_view::ShareView>::with_props(props).render();
+    } else {
+        yew::Renderer::<App>::new().render();
+    }
 }

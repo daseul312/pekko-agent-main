@@ -5,5 +5,6 @@ pub mod chat;
 pub mod header;
 pub mod input;
 pub mod message;
+pub mod share_view;
 pub mod sidebar;
 pub mod suggestions;

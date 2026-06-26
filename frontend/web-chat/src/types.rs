@@ -487,6 +487,48 @@ pub struct HistoryMessage {
     pub content: String,
 }
 
+/// `POST /api/share` 요청. 답변 본문을 공유 시점 스냅샷으로 전송한다.
+#[derive(Clone, Debug, Serialize)]
+pub struct ShareCreateRequest {
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// 차트(`ChartData`)를 직렬화한 JSON 문자열. 답변에 그래프가 있을 때만 채워진다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chart_data: Option<String>,
+}
+
+/// `POST /api/share` 응답.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ShareCreateResponse {
+    pub share_url: String,
+}
+
+/// `GET /api/share/:id` 응답(공유된 답변 본문).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct SharedAnswer {
+    pub content: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// 차트 JSON 문자열(있을 때만). 열람 페이지가 파싱해 `ChartBlock`으로 렌더.
+    #[serde(default)]
+    pub chart_data: Option<String>,
+}
+
+/// 공유 답변 조회 실패 종류(열람 페이지가 상태별로 다른 안내를 띄우기 위함).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShareFetchError {
+    /// 401 — 미로그인.
+    Unauthorized,
+    /// 403 — 다른 회사 계정.
+    Forbidden,
+    /// 404 — 없는 공유 링크.
+    NotFound,
+    /// 기타(네트워크/서버 오류 등). 사용자 표시용 메시지 포함.
+    Other(String),
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct LoginRequest {
     pub employee_id: String,

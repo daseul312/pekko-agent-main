@@ -1,5 +1,5 @@
 /// 경량 마크다운 → HTML 변환기
-/// 지원: 테이블, **볼드**, `코드`, ```코드블록```, 줄바꿈
+/// 지원: 제목(#~######), 테이블, **볼드**, `코드`, ```코드블록```, 줄바꿈
 pub fn markdown_to_html(input: &str) -> String {
     let mut result = String::new();
     let lines: Vec<&str> = input.lines().collect();
@@ -83,6 +83,14 @@ pub fn markdown_to_html(input: &str) -> String {
             continue;
         }
 
+        // ── 제목 (#, ##, ### …) ──
+        if let Some(level) = heading_level(line.trim_start()) {
+            let text = line.trim_start()[level..].trim_start();
+            result.push_str(&format!("<h{level}>{}</h{level}>", inline_format(text)));
+            i += 1;
+            continue;
+        }
+
         // ── 일반 텍스트 행 ──
         if line.trim().is_empty() {
             result.push_str("<br/>");
@@ -95,6 +103,18 @@ pub fn markdown_to_html(input: &str) -> String {
     }
 
     sanitize_html(&result)
+}
+
+/// ATX 제목 레벨(1~6)을 판정한다. `#` 뒤에 공백이 오거나 그 줄이 `#`들로만 끝날 때만 제목.
+fn heading_level(line: &str) -> Option<usize> {
+    let hashes = line.chars().take_while(|&c| c == '#').count();
+    if (1..=6).contains(&hashes) {
+        let rest = &line[hashes..];
+        if rest.is_empty() || rest.starts_with(' ') {
+            return Some(hashes);
+        }
+    }
+    None
 }
 
 /// 테이블 행인지 판단
@@ -241,6 +261,12 @@ fn is_allowed_tag(name: &str) -> bool {
             | "p"
             | "br"
             | "strong"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
     )
 }
 

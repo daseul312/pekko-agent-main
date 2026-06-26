@@ -284,6 +284,83 @@ pub async fn send_query(
     }
 }
 
+/// 백엔드가 만든 공유 URL을, 프론트가 실제로 서빙되는 origin(scheme+host+**포트**)으로
+/// 재작성한다. 백엔드 base가 무엇이든 현재 접속 주소(예: `http://host:8081`)를 따르므로
+/// 8081 같은 포트가 항상 정확히 붙는다. share_id는 백엔드 URL의 마지막 경로 조각에서 취한다.
+fn share_url_on_current_origin(backend_url: &str) -> String {
+    let share_id = backend_url.trim_end_matches('/').rsplit('/').next().unwrap_or_default();
+    let origin = web_sys::window()
+        .and_then(|w| w.location().origin().ok())
+        .filter(|o| !o.is_empty() && o != "null");
+    match origin {
+        Some(origin) if !share_id.is_empty() => {
+            format!("{}/#/share/{}", origin.trim_end_matches('/'), share_id)
+        }
+        // origin을 못 구하면 백엔드 URL을 그대로 사용(서버 측 SHARE_BASE_URL).
+        _ => backend_url.to_string(),
+    }
+}
+
+/// POST /api/share — 답변 1개를 공유 링크로 만든다. 공유 시점의 답변 본문을
+/// 스냅샷으로 보내고, 생성된 공유 URL을 돌려받는다(로그인 쿠키 필수).
+pub async fn create_share(
+    content: &str,
+    session_id: Option<Uuid>,
+    message_id: Option<String>,
+    chart_data: Option<String>,
+) -> Result<String, String> {
+    let url = api_url("/api/share");
+    let body = ShareCreateRequest {
+        content: content.to_string(),
+        session_id,
+        message_id,
+        chart_data,
+    };
+
+    let resp = with_credentials(Request::post(&url))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .map_err(|e| format!("Serialize error: {e}"))?
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+
+    if resp.ok() {
+        resp.json::<ShareCreateResponse>()
+            .await
+            .map(|r| share_url_on_current_origin(&r.share_url))
+            .map_err(|e| format!("Parse error: {e}"))
+    } else {
+        let err = resp
+            .json::<ErrorResponse>()
+            .await
+            .map(|e| e.error)
+            .unwrap_or_else(|_| format!("HTTP {}", resp.status()));
+        Err(err)
+    }
+}
+
+/// GET /api/share/:id — 공유된 답변을 조회한다. 상태코드별로 `ShareFetchError`를
+/// 구분해 열람 페이지가 로그인 유도/접근 거부/없음 안내를 분기할 수 있게 한다.
+pub async fn fetch_shared(share_id: &str) -> Result<SharedAnswer, ShareFetchError> {
+    let url = api_url(&format!("/api/share/{share_id}"));
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| ShareFetchError::Other(format!("Network error: {e}")))?;
+
+    match resp.status() {
+        200 => resp
+            .json::<SharedAnswer>()
+            .await
+            .map_err(|e| ShareFetchError::Other(format!("Parse error: {e}"))),
+        401 => Err(ShareFetchError::Unauthorized),
+        403 => Err(ShareFetchError::Forbidden),
+        404 => Err(ShareFetchError::NotFound),
+        status => Err(ShareFetchError::Other(format!("HTTP {status}"))),
+    }
+}
+
 /// POST /api/query/stream — smart-router query with live NDJSON progress events.
 ///
 /// Calls `on_event` for each `ProcessEvent` as it arrives from the backend and

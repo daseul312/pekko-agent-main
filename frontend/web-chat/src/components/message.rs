@@ -1,3 +1,4 @@
+use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
@@ -15,6 +16,30 @@ use crate::types::{
 extern "C" {
     #[wasm_bindgen(js_namespace = window)]
     fn downloadTableAsCSV(message_id: &str);
+    /// index.html이 정의한 카카오 공유 래퍼. Kakao SDK가 로드/초기화돼 있으면
+    /// 공유창을 띄우고 true, 아니면 false를 돌려준다(미로드 시 안내용). 타이틀은 헬퍼 내부 고정.
+    #[wasm_bindgen(js_namespace = window, js_name = shareKakao)]
+    fn share_kakao(url: &str, description: &str) -> bool;
+}
+
+/// 공유 모달의 세 가지 액션.
+#[derive(Clone, Copy)]
+enum ShareAction {
+    CopyLink,
+    Kakao,
+}
+
+/// 이메일 공유 대상. 사용자가 "이메일로 보내기" 하위 메뉴에서 고른다.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EmailProvider {
+    /// OS 기본 메일 앱(데스크톱 Outlook 등) — mailto.
+    Default,
+    /// Gmail 웹 작성(본문 prefill 지원).
+    Gmail,
+    /// Outlook 웹 작성(office.com, 본문 prefill 지원).
+    Outlook,
+    /// 네이버 메일 — 본문 prefill URL이 없어 링크를 클립보드에 복사 후 작성창을 연다.
+    Naver,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -46,6 +71,12 @@ pub struct MessageProps {
     pub regenerate_disabled: bool,
     #[prop_or_default]
     pub token: Option<String>,
+    /// 현재 세션 id(공유 레코드 추적용 메타데이터). 없어도 공유는 동작한다.
+    #[prop_or_default]
+    pub session_id: Option<Uuid>,
+    /// 로그인 여부. 비로그인 사용자에게는 [공유] 버튼을 숨긴다.
+    #[prop_or_default]
+    pub is_authenticated: bool,
 }
 
 #[function_component(MessageBubble)]
@@ -55,6 +86,15 @@ pub fn message_bubble(props: &MessageProps) -> Html {
     let retry_menu_open = use_state(|| false);
     let is_editing = use_state(|| false);
     let edit_value = use_state(|| msg.content.clone());
+    // 공유 모달 상태. share_url은 첫 공유 액션 시 1회 생성 후 캐시(고아 레코드 방지).
+    let is_share_modal_open = use_state(|| false);
+    let share_url = use_state(|| Option::<String>::None);
+    let share_loading = use_state(|| false);
+    let share_error = use_state(|| Option::<String>::None);
+    let share_copied = use_state(|| false);
+    // 이메일 하위 메뉴(서비스 선택) 펼침 여부 + 안내 문구(예: 네이버 복사 안내).
+    let email_submenu_open = use_state(|| false);
+    let share_notice = use_state(|| Option::<String>::None);
     let is_user = matches!(msg.role, MessageRole::User);
     let is_assistant = matches!(msg.role, MessageRole::Assistant);
     let board_post_route_flow = board_post_route_flow(&msg.content);
@@ -217,6 +257,142 @@ pub fn message_bubble(props: &MessageProps) -> Html {
                 } else {
                     { "📋 복사" }
                 }
+            </button>
+        }
+    } else {
+        html! {}
+    };
+
+    // 답변에 그래프가 있으면 차트 데이터를 JSON으로 직렬화해 함께 스냅샷한다(열람 페이지 재현용).
+    let chart_json: Option<String> = msg
+        .chart_data
+        .as_ref()
+        .and_then(|c| serde_json::to_string(c).ok());
+
+    // 공유 액션 디스패처: 캐시된 share_url이 있으면 즉시 실행하고, 없으면
+    // 이 순간(=실제 액션 클릭) 1회 생성 후 실행한다(모달 오픈만으론 생성 안 함).
+    let on_share_action = {
+        let share_url = share_url.clone();
+        let share_loading = share_loading.clone();
+        let share_error = share_error.clone();
+        let share_copied = share_copied.clone();
+        let content = msg.content.clone();
+        let message_id = msg.id.clone();
+        let chart_json = chart_json.clone();
+        let session_id = props.session_id;
+        Callback::from(move |action: ShareAction| {
+            share_error.set(None);
+            if let Some(url) = (*share_url).clone() {
+                perform_share_action(action, url, &content, &share_copied, &share_error);
+                return;
+            }
+            if *share_loading {
+                return;
+            }
+            let share_url = share_url.clone();
+            let share_loading = share_loading.clone();
+            let share_error = share_error.clone();
+            let share_copied = share_copied.clone();
+            let content = content.clone();
+            let message_id = message_id.clone();
+            let chart_json = chart_json.clone();
+            share_loading.set(true);
+            spawn_local(async move {
+                match crate::api::create_share(&content, session_id, Some(message_id), chart_json).await {
+                    Ok(url) => {
+                        share_url.set(Some(url.clone()));
+                        share_loading.set(false);
+                        perform_share_action(action, url, &content, &share_copied, &share_error);
+                    }
+                    Err(e) => {
+                        share_loading.set(false);
+                        share_error.set(Some(format!("공유 링크 생성 실패: {e}")));
+                    }
+                }
+            });
+        })
+    };
+
+    // 이메일 서비스별 디스패처. 웹 메일(Gmail/Outlook/Naver)은 팝업 차단을 피하려
+    // 사용자 클릭(제스처) 시점에 빈 탭을 먼저 열고, 링크 준비 후 그 탭을 작성 URL로 이동시킨다.
+    let on_email_provider = {
+        let share_url = share_url.clone();
+        let share_loading = share_loading.clone();
+        let share_error = share_error.clone();
+        let share_notice = share_notice.clone();
+        let content = msg.content.clone();
+        let message_id = msg.id.clone();
+        let chart_json = chart_json.clone();
+        let session_id = props.session_id;
+        Callback::from(move |provider: EmailProvider| {
+            share_error.set(None);
+            share_notice.set(None);
+            let preopened = match provider {
+                EmailProvider::Default => None,
+                _ => web_sys::window()
+                    .and_then(|w| w.open_with_url_and_target("", "_blank").ok().flatten()),
+            };
+            if let Some(url) = (*share_url).clone() {
+                open_email_provider(provider, &url, &content, preopened, &share_notice);
+                return;
+            }
+            if *share_loading {
+                if let Some(w) = preopened {
+                    let _ = w.close();
+                }
+                return;
+            }
+            let share_url = share_url.clone();
+            let share_loading = share_loading.clone();
+            let share_error = share_error.clone();
+            let share_notice = share_notice.clone();
+            let content = content.clone();
+            let message_id = message_id.clone();
+            let chart_json = chart_json.clone();
+            share_loading.set(true);
+            spawn_local(async move {
+                match crate::api::create_share(&content, session_id, Some(message_id), chart_json).await {
+                    Ok(url) => {
+                        share_url.set(Some(url.clone()));
+                        share_loading.set(false);
+                        open_email_provider(provider, &url, &content, preopened, &share_notice);
+                    }
+                    Err(e) => {
+                        share_loading.set(false);
+                        if let Some(w) = preopened {
+                            let _ = w.close();
+                        }
+                        share_error.set(Some(format!("공유 링크 생성 실패: {e}")));
+                    }
+                }
+            });
+        })
+    };
+
+    let share_btn = if is_rendered_markdown && props.is_authenticated {
+        let is_share_modal_open = is_share_modal_open.clone();
+        let share_error = share_error.clone();
+        let share_copied = share_copied.clone();
+        let share_notice = share_notice.clone();
+        let email_submenu_open = email_submenu_open.clone();
+        let on_share = Callback::from(move |_: MouseEvent| {
+            share_error.set(None);
+            share_copied.set(false);
+            share_notice.set(None);
+            email_submenu_open.set(false);
+            is_share_modal_open.set(true);
+        });
+        html! {
+            <button class="share-btn" onclick={on_share} title="공유">
+                <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24"
+                     fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="18" cy="5" r="3"></circle>
+                    <circle cx="6" cy="12" r="3"></circle>
+                    <circle cx="18" cy="19" r="3"></circle>
+                    <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line>
+                    <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
+                </svg>
+                { " 공유" }
             </button>
         }
     } else {
@@ -484,6 +660,104 @@ pub fn message_bubble(props: &MessageProps) -> Html {
         |data| html! { <ChartBlock message_id={msg.id.clone()} data={data.clone()} /> },
     );
 
+    let share_modal = if *is_share_modal_open {
+        let close = {
+            let is_share_modal_open = is_share_modal_open.clone();
+            let share_error = share_error.clone();
+            let share_notice = share_notice.clone();
+            let email_submenu_open = email_submenu_open.clone();
+            Callback::from(move |_: MouseEvent| {
+                is_share_modal_open.set(false);
+                share_error.set(None);
+                share_notice.set(None);
+                email_submenu_open.set(false);
+            })
+        };
+        let on_copy = {
+            let on_share_action = on_share_action.clone();
+            Callback::from(move |_: MouseEvent| on_share_action.emit(ShareAction::CopyLink))
+        };
+        let on_email_toggle = {
+            let email_submenu_open = email_submenu_open.clone();
+            let share_notice = share_notice.clone();
+            Callback::from(move |_: MouseEvent| {
+                share_notice.set(None);
+                email_submenu_open.set(!*email_submenu_open);
+            })
+        };
+        let email_btn = |provider: EmailProvider| {
+            let on_email_provider = on_email_provider.clone();
+            Callback::from(move |_: MouseEvent| on_email_provider.emit(provider))
+        };
+        let on_kakao = {
+            let on_share_action = on_share_action.clone();
+            Callback::from(move |_: MouseEvent| on_share_action.emit(ShareAction::Kakao))
+        };
+        html! {
+            <div class="modal-backdrop" onclick={close.clone()}>
+                <div class="share-modal" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
+                    <h3>{ "답변 공유" }</h3>
+                    <div class="share-options">
+                        <button class="share-option" onclick={on_copy} disabled={*share_loading}>
+                            { if *share_copied { "✓ 링크 복사됨" } else { "🔗 링크 복사" } }
+                        </button>
+                        <button class="share-option" onclick={on_email_toggle} disabled={*share_loading}>
+                            <span>{ "✉️ 이메일로 보내기" }</span>
+                            <span class="share-option-caret">{ if *email_submenu_open { "▴" } else { "▾" } }</span>
+                        </button>
+                        if *email_submenu_open {
+                            <div class="share-suboptions">
+                                <button class="share-suboption" onclick={email_btn(EmailProvider::Gmail)} disabled={*share_loading}>
+                                    <svg class="mail-ico-svg" viewBox="0 0 48 48" width="18" height="18">
+                                        <path fill="#4caf50" d="M45,16.2l-5,2.75l-5,4.75L35,40h7c1.657,0,3-1.343,3-3V16.2z"/>
+                                        <path fill="#1e88e5" d="M3,16.2l3.614,1.71L13,23.7V40H6c-1.657,0-3-1.343-3-3V16.2z"/>
+                                        <polygon fill="#e53935" points="35,11.2 24,19.45 13,11.2 12,17 13,23.7 24,31.95 35,23.7 36,17"/>
+                                        <path fill="#c62828" d="M3,12.298V16.2l10,7.5V11.2L9.876,8.859C9.132,8.301,8.228,8,7.298,8 C4.924,8,3,9.924,3,12.298z"/>
+                                        <path fill="#fbc02d" d="M45,12.298V16.2l-10,7.5V11.2l3.124-2.341C38.868,8.301,39.772,8,40.702,8 C43.076,8,45,9.924,45,12.298z"/>
+                                    </svg>
+                                    <span>{ "Gmail" }</span>
+                                </button>
+                                <button class="share-suboption" onclick={email_btn(EmailProvider::Outlook)} disabled={*share_loading}>
+                                    <span class="mail-ico mail-ico-outlook">{ "O" }</span>
+                                    <span>{ "Outlook" }</span>
+                                </button>
+                                <button class="share-suboption" onclick={email_btn(EmailProvider::Naver)} disabled={*share_loading}>
+                                    <span class="mail-ico mail-ico-naver">{ "N" }</span>
+                                    <span>{ "네이버 메일" }</span>
+                                </button>
+                                <button class="share-suboption" onclick={email_btn(EmailProvider::Default)} disabled={*share_loading}>
+                                    <svg class="mail-ico-svg mail-ico-muted" viewBox="0 0 24 24" width="18" height="18"
+                                         fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <rect x="3" y="5" width="18" height="14" rx="2"></rect>
+                                        <path d="m3 7 9 6 9-6"></path>
+                                    </svg>
+                                    <span>{ "기본 메일 앱" }</span>
+                                </button>
+                            </div>
+                        }
+                        <button class="share-option" onclick={on_kakao} disabled={*share_loading}>
+                            { "💬 카카오로 보내기" }
+                        </button>
+                    </div>
+                    if *share_loading {
+                        <div class="share-status">{ "공유 링크 생성 중..." }</div>
+                    }
+                    if let Some(note) = (*share_notice).clone() {
+                        <div class="share-status">{ note }</div>
+                    }
+                    if let Some(err) = (*share_error).clone() {
+                        <div class="share-error">{ err }</div>
+                    }
+                    <div class="modal-actions">
+                        <button class="modal-btn cancel" onclick={close}>{ "닫기" }</button>
+                    </div>
+                </div>
+            </div>
+        }
+    } else {
+        html! {}
+    };
+
     html! {
         <div class={classes!("message-row", role_class, has_law_compare.then_some("has-law-compare"))}>
             <div class="message-avatar">{ avatar }</div>
@@ -503,6 +777,7 @@ pub fn message_bubble(props: &MessageProps) -> Html {
                 }
                 <div class="message-actions">
                     { copy_btn }
+                    { share_btn }
                     { edit_btn }
                     { favorite_btn }
                     { regenerate_btn }
@@ -516,7 +791,128 @@ pub fn message_bubble(props: &MessageProps) -> Html {
                     </div>
                 }
             </div>
+            { share_modal }
         </div>
+    }
+}
+
+/// 캐시된(또는 방금 생성된) share_url로 실제 공유 동작을 수행한다.
+fn perform_share_action(
+    action: ShareAction,
+    url: String,
+    content: &str,
+    share_copied: &UseStateHandle<bool>,
+    share_error: &UseStateHandle<Option<String>>,
+) {
+    match action {
+        ShareAction::CopyLink => {
+            let share_copied = share_copied.clone();
+            spawn_local(async move {
+                if copy_to_clipboard(url).await {
+                    share_copied.set(true);
+                    gloo_timers::future::TimeoutFuture::new(2_000).await;
+                    share_copied.set(false);
+                }
+            });
+        }
+        ShareAction::Kakao => {
+            let description: String = content.chars().take(80).collect();
+            if !share_kakao(&url, &description) {
+                share_error.set(Some("카카오 공유를 사용할 수 없습니다.".to_string()));
+            }
+        }
+    }
+}
+
+/// 링크 중심 이메일 본문을 만든다. 전체 답변(표 포함)은 공유 링크로 확인하도록 안내하고,
+/// 미리보기는 표/제목 마크다운 전까지의 앞부분 산문만 깔끔하게 보여준다(`**`·`#` 제거).
+fn build_email_body(url: &str, content: &str) -> String {
+    const PREVIEW_LEN: usize = 200;
+    // 제목(`#`)·표(`|`)·구분선(`---`)이 시작되면 미리보기를 끊어, 원본 마크다운이 새지 않게 한다.
+    let mut prose = String::new();
+    for line in content.lines() {
+        let t = line.trim_start();
+        if t.starts_with('#') || t.starts_with('|') || t.starts_with("---") {
+            break;
+        }
+        if !prose.is_empty() {
+            prose.push('\n');
+        }
+        prose.push_str(line);
+    }
+    // 앞부분이 곧바로 표/제목으로 시작하면(산문 없음) 전체 내용에서 잘라 쓴다.
+    let source = if prose.trim().is_empty() { content } else { prose.as_str() };
+    let cleaned = source.replace("**", "");
+    let cleaned = cleaned.trim();
+    let truncated = cleaned.chars().count() > PREVIEW_LEN;
+    let mut preview: String = cleaned.chars().take(PREVIEW_LEN).collect();
+    preview = preview.trim().to_string();
+    if truncated {
+        preview.push('…');
+    }
+    format!(
+        "EHS AI 답변을 공유합니다.\n아래 링크에서 표를 포함한 전체 내용을 확인하세요.\n\n{url}\n\n[미리보기]\n{preview}"
+    )
+}
+
+/// 선택한 이메일 서비스로 공유 메일 작성 화면을 연다. 서버 발송 없이 사용자의
+/// 메일 클라이언트/웹메일 작성창을 띄운다(제목·본문은 URL 인코딩해 prefill).
+///
+/// `preopened`는 팝업 차단 회피용으로 클릭 시점에 미리 열어둔 빈 탭(웹메일에만 사용).
+fn open_email_provider(
+    provider: EmailProvider,
+    url: &str,
+    content: &str,
+    preopened: Option<web_sys::Window>,
+    share_notice: &UseStateHandle<Option<String>>,
+) {
+    // 링크 중심 본문: 전체 답변(표 포함)은 URL 길이 제한상 본문에 담을 수 없으므로
+    // 공유 링크로 안내하고, 짧은 미리보기만 덧붙인다.
+    let body_text = build_email_body(url, content);
+    let subject = String::from(js_sys::encode_uri_component("EHS AI 답변 공유"));
+    let body = String::from(js_sys::encode_uri_component(&body_text));
+
+    match provider {
+        EmailProvider::Default => {
+            // OS 기본 메일 앱(데스크톱 Outlook 등). mailto는 프로토콜 핸들러라 팝업 차단 무관.
+            let mailto = format!("mailto:?subject={subject}&body={body}");
+            if let Some(window) = web_sys::window() {
+                let _ = window.open_with_url_and_target(&mailto, "_blank");
+            }
+        }
+        EmailProvider::Gmail => {
+            let compose =
+                format!("https://mail.google.com/mail/?view=cm&fs=1&su={subject}&body={body}");
+            navigate_or_open(preopened, &compose);
+        }
+        EmailProvider::Outlook => {
+            let compose = format!(
+                "https://outlook.office.com/mail/deeplink/compose?subject={subject}&body={body}"
+            );
+            navigate_or_open(preopened, &compose);
+        }
+        EmailProvider::Naver => {
+            // 네이버 메일은 본문 prefill URL이 없어, 링크 중심 본문을 클립보드에 복사하고
+            // 새 메일 작성 화면을 연 뒤 사용자가 붙여넣도록 안내한다.
+            let to_copy = body_text.clone();
+            spawn_local(async move {
+                let _ = copy_to_clipboard(to_copy).await;
+            });
+            navigate_or_open(preopened, "https://mail.naver.com/");
+            share_notice.set(Some(
+                "본문이 클립보드에 복사되었습니다. 네이버 메일에서 '메일쓰기' 후 붙여넣어 주세요.".to_string(),
+            ));
+        }
+    }
+}
+
+/// 미리 열어둔 탭이 있으면 그 탭을 작성 URL로 이동시키고(팝업 차단 회피),
+/// 없으면(차단됐거나 미리 열지 못한 경우) 새 탭으로 직접 연다.
+fn navigate_or_open(preopened: Option<web_sys::Window>, url: &str) {
+    if let Some(w) = preopened {
+        let _ = w.location().set_href(url);
+    } else if let Some(window) = web_sys::window() {
+        let _ = window.open_with_url_and_target(url, "_blank");
     }
 }
 
