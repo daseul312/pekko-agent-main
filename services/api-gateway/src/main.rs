@@ -18,7 +18,7 @@ use tracing::{info, error, warn};
 use pekko_agent_core::{Message, TokenUsage, ShortTermMemory, ToolContext, AgentInfo, AgentStatus};
 use pekko_agent_llm::{LlmConfig, ClaudeClient, OpenAIClient, LlmRequest, ClaudeMessage, ContentBlock, ClaudeTool};
 use pekko_agent_tools::{ToolRegistry, builtin::{PermitSearchTool, ComplianceCheckTool, EhsQueryTool, LawCompareTool, VisualizeTool}};
-use pekko_agent_memory::{CoreDbConversationStore, InMemoryVectorStore, InMemoryEpisodicStore};
+use pekko_agent_memory::{CoreDbConversationStore, CoreDbShareStore, InMemoryVectorStore, InMemoryEpisodicStore};
 use coredb::{CoreDB, DatabaseConfig};
 use pekko_agent_orchestrator::OrchestratorActor;
 use pekko_agent_events::EventPublisher;
@@ -34,6 +34,8 @@ use auth::{AuthIdentity, OptionalAuth};
 struct AppState {
     tool_registry: Arc<RwLock<ToolRegistry>>,
     conversation_store: Arc<CoreDbConversationStore>,
+    /// 답변 공유(share) 저장소. 운영 PG가 아니라 임베디드 CoreDB에 보관한다.
+    share_store: Arc<CoreDbShareStore>,
     vector_store: Arc<InMemoryVectorStore>,
     episodic_store: Arc<InMemoryEpisodicStore>,
     orchestrator: Arc<RwLock<OrchestratorActor>>,
@@ -2267,28 +2269,27 @@ async fn create_share(
     })?;
 
     let share_id = Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO public."ShareLink" (id, content, "companyCode", "sessionId", "messageId", "chartData")
-           VALUES ($1, $2, $3, $4, $5, $6)"#,
-    )
-    .bind(share_id)
-    .bind(&req.content)
-    .bind(&identity.company_code)
-    .bind(req.session_id)
-    .bind(&req.message_id)
-    .bind(&req.chart_data)
-    .execute(state.pg_pool.as_ref())
-    .await
-    .map_err(|e| {
-        error!(error = %e, "공유 링크 저장 실패");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("공유 링크 생성 실패: {e}"),
-                code: "DB_ERROR".into(),
-            }),
+    let created_at = chrono::Utc::now().to_rfc3339();
+    state
+        .share_store
+        .create(
+            &share_id.to_string(),
+            &req.content,
+            &identity.company_code,
+            req.chart_data.as_deref(),
+            &created_at,
         )
-    })?;
+        .await
+        .map_err(|e| {
+            error!(error = %e, "공유 링크 저장 실패");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("공유 링크 생성 실패: {e}"),
+                    code: "DB_ERROR".into(),
+                }),
+            )
+        })?;
 
     let base = std::env::var("SHARE_BASE_URL")
         .unwrap_or_else(|_| "https://ai.safetyone.io".to_string());
@@ -2318,35 +2319,31 @@ async fn get_share(
         )
     })?;
 
-    let row = sqlx::query_as::<_, (String, String, chrono::DateTime<chrono::Utc>, Option<String>)>(
-        r#"SELECT content, "companyCode", "createdAt", "chartData"
-           FROM public."ShareLink" WHERE id = $1"#,
-    )
-    .bind(share_id)
-    .fetch_optional(state.pg_pool.as_ref())
-    .await
-    .map_err(|e| {
-        error!(error = %e, "공유 답변 조회 실패");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("공유 답변 조회 실패: {e}"),
-                code: "DB_ERROR".into(),
-            }),
-        )
-    })?;
+    let record = state
+        .share_store
+        .get(&share_id.to_string())
+        .await
+        .map_err(|e| {
+            error!(error = %e, "공유 답변 조회 실패");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("공유 답변 조회 실패: {e}"),
+                    code: "DB_ERROR".into(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "공유된 답변을 찾을 수 없습니다.".into(),
+                    code: "NOT_FOUND".into(),
+                }),
+            )
+        })?;
 
-    let (content, company_code, created_at, chart_data) = row.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "공유된 답변을 찾을 수 없습니다.".into(),
-                code: "NOT_FOUND".into(),
-            }),
-        )
-    })?;
-
-    if company_code != identity.company_code {
+    if record.company_code != identity.company_code {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
@@ -2356,7 +2353,16 @@ async fn get_share(
         ));
     }
 
-    Ok(Json(SharedAnswerResponse { content, created_at, chart_data }))
+    // 저장된 RFC3339 문자열을 DateTime으로 복원(파싱 실패 시 현재 시각으로 폴백).
+    let created_at = chrono::DateTime::parse_from_rfc3339(&record.created_at)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|_| chrono::Utc::now());
+
+    Ok(Json(SharedAnswerResponse {
+        content: record.content,
+        created_at,
+        chart_data: record.chart_data,
+    }))
 }
 
 /// GET /api/tools - List all available tools
@@ -2443,30 +2449,6 @@ async fn main() -> anyhow::Result<()> {
     info!("Connected to PostgreSQL database");
     let pg_pool = Arc::new(pg_pool);
 
-    // 답변 공유 링크 저장 테이블. 멱등 생성(없을 때만). `expiresAt`은 차기 만료 기능을
-    // 위해 미리 nullable로 둔다 — 첫 버전에선 항상 NULL이며 만료 검사를 하지 않는다.
-    sqlx::query(
-        r#"CREATE TABLE IF NOT EXISTS public."ShareLink" (
-            id uuid PRIMARY KEY,
-            content text NOT NULL,
-            "companyCode" varchar(50) NOT NULL,
-            "sessionId" uuid,
-            "messageId" text,
-            "createdAt" timestamptz NOT NULL DEFAULT now(),
-            "expiresAt" timestamptz NULL,
-            "chartData" text NULL
-        )"#,
-    )
-    .execute(pg_pool.as_ref())
-    .await
-    .expect("Failed to ensure ShareLink table exists");
-
-    // 이미 만들어진 테이블에도 차트 컬럼을 보장(멱등). 답변에 그래프가 있으면 함께 저장한다.
-    sqlx::query(r#"ALTER TABLE public."ShareLink" ADD COLUMN IF NOT EXISTS "chartData" text NULL"#)
-        .execute(pg_pool.as_ref())
-        .await
-        .expect("Failed to ensure ShareLink.chartData column exists");
-
     // 임베디드 coreDB: 사용자별 일일 토큰 사용량을 영구 저장한다(PostgreSQL 테이블 불필요).
     let coredb_dir = std::path::PathBuf::from(
         std::env::var("COREDB_DATA_DIR").unwrap_or_else(|_| "./data/coredb".to_string()),
@@ -2485,6 +2467,12 @@ async fn main() -> anyhow::Result<()> {
         CoreDbConversationStore::new(coredb.clone(), 100)
             .await
             .expect("Failed to initialize conversation store"),
+    );
+    // 답변 공유 저장소도 같은 임베디드 CoreDB를 사용한다(운영 PG 불필요).
+    let share_store = Arc::new(
+        CoreDbShareStore::new(coredb.clone())
+            .await
+            .expect("Failed to initialize share store"),
     );
 
     // RSA keypair for login password encryption. Use LOGIN_RSA_PRIVATE_KEY (PEM) when set
@@ -2590,6 +2578,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         tool_registry: Arc::new(RwLock::new(tool_registry)),
         conversation_store,
+        share_store,
         vector_store: Arc::new(InMemoryVectorStore::new()),
         episodic_store: Arc::new(InMemoryEpisodicStore::new()),
         orchestrator,
