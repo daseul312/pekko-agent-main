@@ -172,6 +172,7 @@
         display: flex;
         width: 100%;
         height: 100%;
+        position: relative;
       }
 
       /* ── Sidebar ── */
@@ -357,6 +358,50 @@
         min-width: 0;
         background: var(--bg);
         transition: background 0.3s ease;
+      }
+
+      /* ── PC: 사이드바 접기/펼치기 토글 (사이드바·콘텐츠 경계) ── */
+      .sidebar-collapse-toggle {
+        position: absolute;
+        top: 50%;
+        left: 260px;
+        transform: translate(-50%, -50%);
+        z-index: 30;
+        width: 24px;
+        height: 48px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 1px solid var(--sidebar-border);
+        border-radius: 8px;
+        background: var(--chat-bg);
+        color: var(--sidebar-header-text);
+        cursor: pointer;
+        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+        transition: left 0.3s ease, background 0.2s ease, color 0.2s ease;
+      }
+      .sidebar-collapse-toggle:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      .sidebar-collapse-toggle svg {
+        transition: transform 0.3s ease;
+      }
+      /* 접힘 상태: 사이드바 폭 0, 토글은 왼쪽 끝으로, 화살표 방향 반전 */
+      .app-container.sidebar-collapsed .sidebar {
+        width: 0;
+        min-width: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right: none;
+      }
+      .app-container.sidebar-collapsed .sidebar-collapse-toggle {
+        left: 6px;
+        transform: translate(0, -50%);
+      }
+      .app-container.sidebar-collapsed .sidebar-collapse-toggle svg {
+        transform: rotate(180deg);
       }
       .mobile-sidebar-toggle,
       .mobile-sidebar-backdrop {
@@ -2409,6 +2454,10 @@
           left: 12px;
           z-index: 40;
           display: flex;
+        }
+        /* 모바일에서는 PC용 접기/펼치기 토글을 숨긴다 */
+        .sidebar-collapse-toggle {
+          display: none;
         }
         .main {
           width: 100%;

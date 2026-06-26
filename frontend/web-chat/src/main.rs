@@ -1027,6 +1027,8 @@ fn app() -> Html {
     let show_password = use_state(|| false);
     let is_dark_mode = use_state(|| LocalStorage::get::<bool>(THEME_STORAGE_KEY).unwrap_or(false));
     let is_mobile_sidebar_open = use_state(|| false);
+    // PC(데스크톱)에서 대화 기록 사이드바 접기/펼치기 상태. 기본값은 펼침(false).
+    let is_sidebar_collapsed = use_state(|| false);
 
     // Persist theme
     {
@@ -1391,6 +1393,14 @@ fn app() -> Html {
         let is_mobile_sidebar_open = is_mobile_sidebar_open.clone();
         Callback::from(move |_: MouseEvent| {
             is_mobile_sidebar_open.set(false);
+        })
+    };
+
+    // PC 사이드바 접기/펼치기 토글.
+    let on_sidebar_collapse_toggle = {
+        let is_sidebar_collapsed = is_sidebar_collapsed.clone();
+        Callback::from(move |_: MouseEvent| {
+            is_sidebar_collapsed.set(!*is_sidebar_collapsed);
         })
     };
 
@@ -2072,6 +2082,7 @@ fn app() -> Html {
 
     let app_class = if *is_dark_mode { "dark" } else { "" };
     let mobile_sidebar_class = (*is_mobile_sidebar_open).then_some("mobile-sidebar-open");
+    let collapsed_sidebar_class = (*is_sidebar_collapsed).then_some("sidebar-collapsed");
 
     // "답변 중" 표시는 오직 현재 보고 있는 대화의 pending 여부로만 판단한다.
     // (전역 is_loading을 쓰면 백그라운드에서 다른 대화가 처리 중일 때 이미 답변이 끝난
@@ -2120,7 +2131,7 @@ fn app() -> Html {
     }
 
     html! {
-        <div class={classes!("app-container", app_class, mobile_sidebar_class)}>
+        <div class={classes!("app-container", app_class, mobile_sidebar_class, collapsed_sidebar_class)}>
                 <Sidebar
                     sessions={(*sessions).clone()}
                     agents={(*agents).clone()}
@@ -2136,8 +2147,17 @@ fn app() -> Html {
                     favorites={(*favorites).clone()}
                     on_favorite_ask={on_favorite_ask.clone()}
                     on_favorite_delete={on_favorite_delete.clone()}
-                    is_feedback_admin={auth_user.as_ref().map(|u| u.is_feedback_admin).unwrap_or(false)}
                 />
+            // ── PC: 사이드바/콘텐츠 경계의 접기·펼치기 토글 ──
+            <button
+                type="button"
+                class="sidebar-collapse-toggle"
+                aria-label={ if *is_sidebar_collapsed { "대화 기록 펼치기" } else { "대화 기록 접기" } }
+                title={ if *is_sidebar_collapsed { "대화 기록 펼치기" } else { "대화 기록 접기" } }
+                onclick={on_sidebar_collapse_toggle}
+            >
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+            </button>
             { if *is_mobile_sidebar_open {
                 html! {
                     <button

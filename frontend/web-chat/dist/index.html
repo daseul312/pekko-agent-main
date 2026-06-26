@@ -6,8 +6,8 @@
     <title>Core Agentic AI — EHS AI 채팅</title>
     
 <script type="module">
-import init, * as bindings from '/pekko-agent-web-chat-2c86b8886086e9bd.js';
-const wasm = await init({ module_or_path: '/pekko-agent-web-chat-2c86b8886086e9bd_bg.wasm' });
+import init, * as bindings from '/pekko-agent-web-chat-61c1300b6aac7d82.js';
+const wasm = await init({ module_or_path: '/pekko-agent-web-chat-61c1300b6aac7d82_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -183,6 +183,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         display: flex;
         width: 100%;
         height: 100%;
+        position: relative;
       }
 
       /* ── Sidebar ── */
@@ -368,6 +369,50 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         min-width: 0;
         background: var(--bg);
         transition: background 0.3s ease;
+      }
+
+      /* ── PC: 사이드바 접기/펼치기 토글 (사이드바·콘텐츠 경계) ── */
+      .sidebar-collapse-toggle {
+        position: absolute;
+        top: 50%;
+        left: 260px;
+        transform: translate(-50%, -50%);
+        z-index: 30;
+        width: 24px;
+        height: 48px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 1px solid var(--sidebar-border);
+        border-radius: 8px;
+        background: var(--chat-bg);
+        color: var(--sidebar-header-text);
+        cursor: pointer;
+        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+        transition: left 0.3s ease, background 0.2s ease, color 0.2s ease;
+      }
+      .sidebar-collapse-toggle:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      .sidebar-collapse-toggle svg {
+        transition: transform 0.3s ease;
+      }
+      /* 접힘 상태: 사이드바 폭 0, 토글은 왼쪽 끝으로, 화살표 방향 반전 */
+      .app-container.sidebar-collapsed .sidebar {
+        width: 0;
+        min-width: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right: none;
+      }
+      .app-container.sidebar-collapsed .sidebar-collapse-toggle {
+        left: 6px;
+        transform: translate(0, -50%);
+      }
+      .app-container.sidebar-collapsed .sidebar-collapse-toggle svg {
+        transform: rotate(180deg);
       }
       .mobile-sidebar-toggle,
       .mobile-sidebar-backdrop {
@@ -2420,6 +2465,10 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
           left: 12px;
           z-index: 40;
           display: flex;
+        }
+        /* 모바일에서는 PC용 접기/펼치기 토글을 숨긴다 */
+        .sidebar-collapse-toggle {
+          display: none;
         }
         .main {
           width: 100%;
@@ -5041,6 +5090,6 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         });
       }
     </script>
-  <link rel="modulepreload" href="/pekko-agent-web-chat-2c86b8886086e9bd.js" crossorigin="anonymous" integrity="sha384-JFEHnGOIguIM19m8Jd1kUyH4r3va3SlJ94ULjLeO4friQQKelW3qISypNpdNpviR"><link rel="preload" href="/pekko-agent-web-chat-2c86b8886086e9bd_bg.wasm" crossorigin="anonymous" integrity="sha384-Wi80xe+Rt018wzWKlo9qhx2QCJnvlTyKCTEBiZ2j2IyXrflUyrso9p0tl4Bl0LoT" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/pekko-agent-web-chat-61c1300b6aac7d82.js" crossorigin="anonymous" integrity="sha384-SMsZ/ooHAiRJ02U7JGqTpLDzNR1CWlPD9+s7Z8HVTzia/cFN2EJ8yGj+QljrUOZU"><link rel="preload" href="/pekko-agent-web-chat-61c1300b6aac7d82_bg.wasm" crossorigin="anonymous" integrity="sha384-ADS9VFQwNIrkJZ53xLucudL7rqRO2mxK4eGq5yE7CyhIDJCXz93/4I1sL+9oN6pY" as="fetch" type="application/wasm"></head>
   <body></body>
 </html>

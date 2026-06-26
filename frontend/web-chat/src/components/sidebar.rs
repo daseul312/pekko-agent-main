@@ -82,9 +82,6 @@ pub struct SidebarProps {
     pub favorites: Vec<FavoriteQuestion>,
     pub on_favorite_ask: Callback<FavoriteQuestion>,
     pub on_favorite_delete: Callback<uuid::Uuid>,
-    /// 피드백 통계 열람 권한자(허용목록)면 사이드바에 진입 메뉴를 노출한다.
-    #[prop_or_default]
-    pub is_feedback_admin: bool,
 }
 
 #[function_component(Sidebar)]
@@ -358,27 +355,6 @@ pub fn sidebar(props: &SidebarProps) -> Html {
                     }
                 }}
             </div>
-
-            // ── 피드백 통계 진입(허용목록 사용자만) ──
-            if props.is_feedback_admin {
-                <button
-                    class="sidebar-feedback-stats"
-                    onclick={Callback::from(|_: MouseEvent| {
-                        if let Some(w) = web_sys::window() {
-                            let loc = w.location();
-                            let _ = loc.set_hash("#/admin/feedback");
-                            let _ = loc.reload();
-                        }
-                    })}
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                        <line x1="18" y1="20" x2="18" y2="10"></line>
-                        <line x1="12" y1="20" x2="12" y2="4"></line>
-                        <line x1="6" y1="20" x2="6" y2="14"></line>
-                    </svg>
-                    <span>{ "피드백 통계" }</span>
-                </button>
-            }
 
             // ── Footer ──
             <div class="sidebar-footer">
