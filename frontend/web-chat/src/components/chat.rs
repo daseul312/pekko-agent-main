@@ -160,14 +160,6 @@ pub fn chat_area(props: &ChatProps) -> Html {
             .as_ref()
             .map(|m| m.name.as_str())
             .unwrap_or("EHS AI Agent");
-        // 현재 에이전트 id와, 이미 즐겨찾기에 담긴 질문 텍스트 집합(별 채움 판정용).
-        let agent_id = props
-            .agent_meta
-            .as_ref()
-            .map(|m| m.id.clone())
-            .unwrap_or_default();
-        let favorited_set: std::collections::HashSet<String> =
-            props.favorites.iter().map(|f| f.question.clone()).collect();
         let back_to_agents = {
             let cb = props.on_back_to_agents.clone();
             Callback::from(move |_: MouseEvent| cb.emit(()))
@@ -208,29 +200,12 @@ pub fn chat_area(props: &ChatProps) -> Html {
                             let text = ex.to_string();
                             let cb = props.on_example_click.clone();
                             let emitted = text.clone();
-                            let is_fav = favorited_set.contains(&text);
-                            let on_star = {
-                                let toggle = props.on_favorite_toggle.clone();
-                                let agent_id = agent_id.clone();
-                                let q = text.clone();
-                                Callback::from(move |e: MouseEvent| {
-                                    e.stop_propagation();
-                                    toggle.emit((agent_id.clone(), q.clone()));
-                                })
-                            };
                             html! {
                                 <div class="welcome-example"
                                     onclick={Callback::from(move |_: MouseEvent| cb.emit(emitted.clone()))}
                                 >
                                     <span class="example-icon">{ "💡" }</span>
                                     <span class="example-text">{ text }</span>
-                                    <button type="button"
-                                        class={classes!("example-fav-star", is_fav.then_some("active"))}
-                                        onclick={on_star}
-                                        title={ if is_fav { "즐겨찾기 해제" } else { "즐겨찾기에 추가" } }
-                                    >
-                                        { if is_fav { "⭐" } else { "☆" } }
-                                    </button>
                                 </div>
                             }
                         })}
