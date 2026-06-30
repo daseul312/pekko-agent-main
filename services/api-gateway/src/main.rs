@@ -18,7 +18,7 @@ use tracing::{info, error, warn};
 use pekko_agent_core::{Message, TokenUsage, ShortTermMemory, ToolContext, AgentInfo, AgentStatus};
 use pekko_agent_llm::{LlmConfig, ClaudeClient, OpenAIClient, LlmRequest, ClaudeMessage, ContentBlock, ClaudeTool};
 use pekko_agent_tools::{ToolRegistry, builtin::{PermitSearchTool, ComplianceCheckTool, EhsQueryTool, LawCompareTool, VisualizeTool}};
-use pekko_agent_memory::{CoreDbConversationStore, CoreDbShareStore, CoreDbFeedbackStore, CoreDbResolutionStore, CoreDbNotificationStore, InMemoryVectorStore, InMemoryEpisodicStore};
+use pekko_agent_memory::{CoreDbConversationStore, CoreDbShareStore, CoreDbFeedbackStore, CoreDbResolutionStore, CoreDbNotificationStore, CoreDbPromptOverrideStore, InMemoryVectorStore, InMemoryEpisodicStore};
 use coredb::{CoreDB, DatabaseConfig};
 use pekko_agent_orchestrator::OrchestratorActor;
 use pekko_agent_events::EventPublisher;
@@ -42,6 +42,8 @@ struct AppState {
     resolution_store: Arc<CoreDbResolutionStore>,
     /// 인앱 알림 저장소. CoreDB.
     notification_store: Arc<CoreDbNotificationStore>,
+    /// 질문별 개선 프롬프트(개선 지시) 저장소. 승인된 개선을 동일 질문 재질의에 재적용. CoreDB.
+    prompt_override_store: Arc<CoreDbPromptOverrideStore>,
     vector_store: Arc<InMemoryVectorStore>,
     episodic_store: Arc<InMemoryEpisodicStore>,
     orchestrator: Arc<RwLock<OrchestratorActor>>,
@@ -240,7 +242,7 @@ fn tool_friendly_name(tool_name: &str) -> &'static str {
 /// 미등록 테이블은 입력 이름을 그대로 돌려주므로 반환 수명은 입력에 묶인다.
 fn table_friendly_name(table: &str) -> &str {
     match table {
-        "dangerousworkmanagement" => "위험작업허가",
+        "dangerousworkmanagement" => "안전작업허가",
         "tbmmanagement" => "TBM",
         "accidentfreemanagement" => "무재해",
         "riskassessmentmanagement" => "위험성평가",
@@ -665,12 +667,16 @@ struct CommentsQuery {
 /// When `identity` is `Some`, the logged-in employee's scope is injected so the LLM
 /// filters results to that person (and their company). When `None` (anonymous), the
 /// company-wide / 전체 조회 behaviour is kept.
-fn build_system_prompt(agent_id: &str, identity: Option<&AuthIdentity>) -> String {
+fn build_system_prompt(
+    agent_id: &str,
+    identity: Option<&AuthIdentity>,
+    extra_instructions: Option<&str>,
+) -> String {
     let agent_desc = match agent_id {
         "ehs-permit-agent" => {
             "당신은 EHS(환경안전보건) 허가 관리 전문 AI 에이전트입니다.\n\
-             역할: 위험작업 허가(PTW) 현황 조회/분석, 작업 허가 프로세스 안내, 위험작업 유형별 통계, 허가 승인/반려 현황 추적\n\
-             주요 테이블: dangerousworkmanagement(위험작업허가), tbmmanagement(TBM), accidentfreemanagement(무재해)"
+             역할: 안전작업 허가(PTW) 현황 조회/분석, 작업 허가 프로세스 안내, 안전작업 유형별 통계, 허가 승인/반려 현황 추적\n\
+             주요 테이블: dangerousworkmanagement(안전작업허가), tbmmanagement(TBM), accidentfreemanagement(무재해)"
         }
         "ehs-inspection-agent" => {
             "당신은 EHS(환경안전보건) 점검 관리 전문 AI 에이전트입니다.\n\
@@ -736,7 +742,7 @@ fn build_system_prompt(agent_id: &str, identity: Option<&AuthIdentity>) -> Strin
             .to_string(),
     };
 
-    format!(
+    let base = format!(
         "{agent_desc}\n{scope_section}\n\
          [현재 날짜] 오늘은 {today} 입니다. \
          날짜 관련 쿼리 시 이 날짜를 기준으로 하세요. \
@@ -767,15 +773,24 @@ fn build_system_prompt(agent_id: &str, identity: Option<&AuthIdentity>) -> Strin
          - SELECT *는 피하고, 필요한 컬럼만 선택하세요.\n\
          - 큰 테이블은 반드시 LIMIT을 사용하세요.\n\
          - 통계가 필요하면 COUNT, SUM, AVG 등 집계 함수를 활용하세요.\n\
+         - [필수] 삭제 데이터 제외: 조회 대상 테이블에 is_deleted 컬럼이 있으면 \
+           반드시 WHERE 절에 is_deleted = 'N' 조건을 추가하세요. is_deleted = 'Y'(삭제됨)인 행은 \
+           목록·집계 어디에도 포함하지 마세요. COUNT 등 집계에도 동일하게 적용합니다.\n\
          - 쿼리 오류 시 오류 메시지를 분석하여 컬럼명/타입을 수정하고 재시도하세요.\n\
          \n\
          응답 규칙:\n\
          - 한국어로 답변하세요.\n\
          - 반드시 실제 데이터 기반으로 정확한 수치를 제공하세요.\n\
          - 필요시 개선 제안을 추가하세요.\n\
+         - 조회에 내부적으로 사용한 필터 조건(companyCode, use_yn, is_deleted 등 컬럼명·코드값이나 \
+           \"회사코드 10 기준\", \"use_yn=Y\", \"삭제 제외\" 같은 설명)은 답변에 노출하지 마세요. \
+           이는 당연한 전제이므로 언급 없이 결과만 자연스럽게 설명하세요.\n\
          \n\
          [필수] 응답 형식:\n\
          - 조회 결과가 여러 행이면 반드시 마크다운 테이블로 정리하세요.\n\
+         - 목록을 보여줄 때 고유 식별 번호(예: 체크리스트번호, 허가번호 등)가 있으면 \
+           그 번호 기준으로 정렬하세요. 별도 정렬 기준이 없으면 번호 내림차순(큰 번호=최신 우선)으로 \
+           보여주고, 가능하면 SQL에서 ORDER BY로 정렬하세요.\n\
          - 테이블 형식: | 컬럼1 | 컬럼2 | ... |\\n|---|---|...|\\n| 값1 | 값2 | ... |\n\
          - 통계 요약도 테이블로 보여주세요.\n\
          - 테이블 앞뒤에 간단한 설명을 붙이세요.\n\
@@ -790,6 +805,41 @@ fn build_system_prompt(agent_id: &str, identity: Option<&AuthIdentity>) -> Strin
          - 데이터에서 이상 신호(0건 누락, 기한 임박, 급증·급감, 예상 대비 큰 차이)가 보이면 \
            visualize 도구의 insight에 한 문장으로 경고하세요(level은 경고면 warn, 위험이면 alert).\n\
          - 단일 수치나 비교 의미가 없는 결과(목록 1건 등)는 차트를 만들지 마세요."
+    );
+
+    // 피드백 기반 개선 지시(있을 때만). 재생성 또는 저장된 질문별 오버라이드에서 주입된다.
+    match extra_instructions {
+        Some(d) if !d.trim().is_empty() => format!("{base}\n\n[개선 지시]\n{d}"),
+        _ => base,
+    }
+}
+
+/// 부정 피드백을 근거로 한 "개선 지시"를 만든다. 재생성(regenerate_improved_answer)과
+/// 승인 후 질문별 재적용(prompt_overrides)에서 동일하게 재사용해 일관성을 유지한다.
+/// 코멘트/태그가 비어도 일반 개선 지시로 동작한다.
+///
+/// [중요] 이전 답변 본문은 절대 넣지 않는다. 과거에 이전 답변을 directive에 넣었더니
+/// LLM이 새로 조회하지 않고 그 안의 (이미 삭제된) 행/수치를 그대로 베껴버렸다. 따라서
+/// 무엇이 문제였는지는 사용자 코멘트/태그로만 전달하고, 데이터는 반드시 새로 조회하게 한다.
+fn build_improvement_directive(comment: Option<&str>, tags: &[String]) -> String {
+    let tag_part = if tags.is_empty() {
+        String::new()
+    } else {
+        format!("부정 평가 사유: {}. ", tags.join(", "))
+    };
+    let comment_part = match comment.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(c) => format!("사용자 코멘트: \"{}\". ", c),
+        None => String::new(),
+    };
+    format!(
+        "직전 답변이 사용자 피드백에서 부정 평가를 받았습니다. {tag_part}{comment_part}\
+         [필수] 이전 답변에 들어 있던 어떤 건수·목록·항목·통계 수치도 신뢰하거나 재사용하지 마세요. \
+         반드시 ehs_query로 처음부터 새로 조회해 실제 값으로 다시 계산하세요. \
+         [필수] is_deleted 컬럼이 있는 테이블은 WHERE 절에 is_deleted = 'N'을 넣어 삭제된 행(='Y')을 \
+         목록·집계(COUNT 등) 어디에서도 완전히 제외하세요. 삭제된 항목이 결과에 포함되면 안 됩니다. \
+         use_yn 등 사용여부 컬럼이 있으면 사용 중(='Y')만 집계하세요. \
+         일반 인사말이나 되묻기(\"무엇을 도와드릴까요\" 등)로 끝내지 마세요. \
+         같은 질문에는 이 기준을 항상 적용합니다."
     )
 }
 
@@ -961,7 +1011,7 @@ async fn run_agent_query_pipeline(
     ));
 
     // Run the agent ReAct tool-loop (user message already stored above)
-    let result = execute_agent_query(state, agent_id, req, session_id, emit, stream, auth).await?;
+    let result = execute_agent_query(state, agent_id, req, session_id, emit, stream, auth, None).await?;
 
     Ok(QueryResponse {
         session_id,
@@ -991,6 +1041,7 @@ async fn execute_agent_query(
     emit: &(impl Fn(ProcessEvent) + Send + Sync),
     enable_plan: bool,
     auth: &Option<AuthIdentity>,
+    extra_directive: Option<&str>,
 ) -> Result<AgentQueryResult, (StatusCode, Json<ErrorResponse>)> {
     let conv_store = state.conversation_store.clone();
 
@@ -1021,8 +1072,48 @@ async fn execute_agent_query(
 
     info!(tool_count = claude_tools.len(), "Sending tools to Claude");
 
-    // Build system prompt
-    let system_prompt = build_system_prompt(agent_id, auth.as_ref());
+    // Build system prompt.
+    // extra_directive(Some)는 재생성 경로에서 명시적으로 넘어온 개선 지시다. 없으면(None)
+    // 정상 질의이므로, 회사+에이전트+정규화 질문으로 저장된 개선 오버라이드가 있는지 조회해
+    // 있으면 동일한 방식으로 주입한다(승인된 질문 재질의 시 자동 개선 적용).
+    let resolved_directive: Option<String> = match extra_directive {
+        Some(d) => Some(d.to_string()),
+        None => match auth.as_ref() {
+            Some(id) => {
+                let q_norm = compact_lower(&req.content);
+                match state
+                    .prompt_override_store
+                    .get(&id.company_code, agent_id, &q_norm)
+                    .await
+                {
+                    Ok(Some(rec)) => {
+                        info!(
+                            company = %id.company_code,
+                            agent = agent_id,
+                            q_norm = %q_norm,
+                            "저장된 개선 프롬프트 오버라이드 적용(hit)"
+                        );
+                        Some(rec.directive)
+                    }
+                    Ok(None) => {
+                        info!(
+                            company = %id.company_code,
+                            agent = agent_id,
+                            q_norm = %q_norm,
+                            "개선 프롬프트 오버라이드 없음(miss)"
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "개선 프롬프트 오버라이드 조회 실패 — 무시하고 진행");
+                        None
+                    }
+                }
+            }
+            None => None,
+        },
+    };
+    let system_prompt = build_system_prompt(agent_id, auth.as_ref(), resolved_directive.as_deref());
 
     // Tool use loop - keep calling Claude until it gives a final text response
     let mut messages = claude_messages;
@@ -1176,7 +1267,7 @@ async fn execute_agent_query(
                     if name == "ehs_query" {
                         let tables = describe_query_tables(input);
                         if !tables.is_empty() {
-                            // 예: ["위험작업허가(dangerousworkmanagement)", "직원정보(employeeinfo)"]
+                            // 예: ["안전작업허가(dangerousworkmanagement)", "직원정보(employeeinfo)"]
                             return tables;
                         }
                     }
@@ -1419,7 +1510,7 @@ fn agent_display_name(agent_id: &str) -> &'static str {
 fn agent_routing_summary(agent_id: &str) -> &'static str {
     match agent_id {
         "ehs-permit-agent" => {
-            "작업허가서, 위험작업허가, TBM, 작업 전 계획과 체크리스트, 화기 작업 등 허가 기반 업무"
+            "작업허가서, 안전작업허가, TBM, 작업 전 계획과 점검표, 화기 작업 등 허가 기반 업무"
         }
         "ehs-inspection-agent" => {
             "점검 일정, 순회점검, 위험성평가, 공동 안전점검, 점검 체크리스트와 개선조치"
@@ -1504,12 +1595,14 @@ fn is_prework_checklist_request(content: &str) -> bool {
     let compact = compact_lower(content);
 
     compact.contains("작업전체크리스트")
+        || compact.contains("작업전점검표")
         || compact.contains("작업전점검")
         || compact.contains("preworkchecklist")
         || compact.contains("pre-workchecklist")
         || compact.contains("pre_work_checklist")
         || (compact.contains("pre-work") && compact.contains("checklist"))
         || (compact.contains("작업전") && compact.contains("체크리스트"))
+        || (compact.contains("작업전") && compact.contains("점검표"))
 }
 
 fn is_round_inspection_request(content: &str) -> bool {
@@ -1575,14 +1668,14 @@ fn routing_fallback(content: &str) -> RoutingDecision {
         (
             "ehs-permit-agent",
             &[
-                "permit", "허가", "작업허가", "위험작업", "tbm", "작업전", "pre-work", "화기",
+                "permit", "허가", "작업허가", "안전작업", "tbm", "작업전", "pre-work", "화기",
                 "밀폐공간",
             ],
         ),
         (
             "ehs-inspection-agent",
             &[
-                "inspection", "점검", "순회", "체크리스트", "위험성평가", "risk assessment",
+                "inspection", "점검", "순회", "체크리스트", "점검표", "위험성평가", "risk assessment",
                 "near miss", "개선조치",
             ],
         ),
@@ -2182,7 +2275,7 @@ async fn run_query_pipeline(
     // Single-agent smart route.
     if decision.agent_ids.len() <= 1 {
         let result =
-            execute_agent_query(state, &decision.primary_agent_id, req, session_id, emit, stream, auth)
+            execute_agent_query(state, &decision.primary_agent_id, req, session_id, emit, stream, auth, None)
                 .await?;
         // Persist the assistant response.
         let _ = conv_store
@@ -2236,7 +2329,7 @@ async fn run_query_pipeline(
             None,
             StepPhase::Active,
         ));
-        let result = execute_agent_query(state, agent_id, req, session_id, &noop, false, auth).await?;
+        let result = execute_agent_query(state, agent_id, req, session_id, &noop, false, auth, None).await?;
         emit(step_event(
             &step_id,
             &format!("{agent_name} 처리"),
@@ -3027,6 +3120,16 @@ async fn regenerate_improved_answer(
         tenant_id: default_tenant(),
         user_id: rec.employee_id.clone(),
     };
+    // [중요] execute_agent_query는 LLM 메시지를 대화 히스토리에서만 만든다. 정상 경로처럼
+    // 질문을 throwaway 세션에 먼저 저장하지 않으면 messages가 비어 LLM이 일반 인사말만
+    // 내놓는다. 따라서 재실행 전에 원 질문을 user turn으로 저장한다.
+    let _ = state
+        .conversation_store
+        .append_message(&new_session, Message::user(&question))
+        .await;
+    // 사용자 불만(코멘트/태그)을 근거로 개선 지시를 만들어 주입한다. 이전 답변 본문은
+    // 넣지 않는다(복붙 방지). 데이터는 새 조회로만 채운다.
+    let directive = build_improvement_directive(rec.comment.as_deref(), &rec.tags);
     let noop = |_: ProcessEvent| {};
     let result = execute_agent_query(
         state,
@@ -3036,6 +3139,7 @@ async fn regenerate_improved_answer(
         &noop,
         false,
         &Some(identity),
+        Some(&directive),
     )
     .await?;
 
@@ -3279,6 +3383,47 @@ async fn submit_reverify(
         .set_reverify(&feedback_key, &req.result, comment.as_deref(), &now)
         .await
         .map_err(feedback_db_error)?;
+
+    // 사용자가 "정확"으로 승인하면, 그 답변을 만든 개선 지시를 질문별 오버라이드로 저장한다.
+    // 이후 같은 회사에서 동일 질문을 다시 하면 첫 답변부터 자동 적용된다(회사 전체 범위).
+    if req.result == "accurate" {
+        // 원 피드백에서 코멘트/태그를 확보(없으면 일반 개선 지시로 폴백).
+        let (fb_comment, fb_tags) = match state.feedback_store.list_all().await {
+            Ok(list) => list
+                .into_iter()
+                .find(|r| feedback_key_of(r) == feedback_key)
+                .map(|r| (r.comment, r.tags))
+                .unwrap_or((None, Vec::new())),
+            Err(e) => {
+                warn!(error = %e, "피드백 조회 실패 — 코멘트/태그 없이 개선 지시 생성");
+                (None, Vec::new())
+            }
+        };
+        let directive = build_improvement_directive(fb_comment.as_deref(), &fb_tags);
+        let q_norm = compact_lower(&rec.question);
+        match state
+            .prompt_override_store
+            .upsert(
+                &rec.company_code,
+                &rec.agent_id,
+                &q_norm,
+                &directive,
+                &feedback_key,
+                &now,
+            )
+            .await
+        {
+            Ok(()) => info!(
+                company = %rec.company_code,
+                agent = %rec.agent_id,
+                q_norm = %q_norm,
+                "개선 프롬프트 오버라이드 저장 완료"
+            ),
+            // 오버라이드 저장 실패가 재확인 자체를 막지 않도록 경고만 남긴다.
+            Err(e) => warn!(error = %e, "개선 프롬프트 오버라이드 저장 실패"),
+        }
+    }
+
     Ok(Json(FeedbackResponse { ok: true }))
 }
 
@@ -3472,6 +3617,11 @@ async fn main() -> anyhow::Result<()> {
             .await
             .expect("Failed to initialize notification store"),
     );
+    let prompt_override_store = Arc::new(
+        CoreDbPromptOverrideStore::new(coredb.clone())
+            .await
+            .expect("Failed to initialize prompt-override store"),
+    );
 
     // RSA keypair for login password encryption. Use LOGIN_RSA_PRIVATE_KEY (PEM) when set
     // for cross-restart / multi-instance stability; otherwise generate an ephemeral key.
@@ -3514,7 +3664,7 @@ async fn main() -> anyhow::Result<()> {
         orch.register_agent(AgentInfo {
             agent_id: "ehs-permit-agent".to_string(),
             agent_type: "ehs".to_string(),
-            description: "위험작업 허가(PTW) 관리 에이전트".to_string(),
+            description: "안전작업 허가(PTW) 관리 에이전트".to_string(),
             capabilities: vec!["permit_search".to_string(), "ehs_query".to_string()],
             status: AgentStatus::Available,
         });
@@ -3580,6 +3730,7 @@ async fn main() -> anyhow::Result<()> {
         feedback_store,
         resolution_store,
         notification_store,
+        prompt_override_store,
         vector_store: Arc::new(InMemoryVectorStore::new()),
         episodic_store: Arc::new(InMemoryEpisodicStore::new()),
         orchestrator,

@@ -98,6 +98,8 @@ fn canonicalize_checklist_work_type(
     let normalized_base_content = normalize_for_matching(base_content);
     if !normalized_base_content.contains("작업전체크리스트")
         && !normalized_base_content.contains("체크리스트")
+        && !normalized_base_content.contains("작업전점검표")
+        && !normalized_base_content.contains("점검표")
     {
         return None;
     }
@@ -119,7 +121,7 @@ fn is_prework_plan_submission_request(content: &str) -> bool {
 fn is_pending_permit_list_request(content: &str) -> bool {
     let normalized = normalize_for_matching(content);
     normalized.contains("오늘")
-        && normalized.contains("위험작업허가")
+        && normalized.contains("안전작업허가")
         && (normalized.contains("확인대기") || normalized.contains("승인대기"))
         && (normalized.contains("목록") || normalized.contains("리스트"))
 }
@@ -387,7 +389,7 @@ fn build_pending_permit_work_type_prompt_message() -> ChatMessage {
     ChatMessage {
         id: Uuid::new_v4().to_string(),
         role: MessageRole::Assistant,
-        content: "어떤 작업구분의 위험작업 허가를 확인할까요? 아래에서 선택해 주세요.".to_string(),
+        content: "어떤 작업구분의 안전작업 허가를 확인할까요? 아래에서 선택해 주세요.".to_string(),
         request_content: None,
         tools_used: vec![],
         token_usage: None,
@@ -2614,11 +2616,15 @@ fn extract_suggestions(user_content: &str, response_content: &str) -> Option<Vec
     let is_pending_permit_list_request = is_pending_permit_list_request(user_content);
     let is_prework_plan_submission_query = is_prework_plan_submission_request(user_content);
     let is_checklist_request = normalized_user_content.contains("작업전체크리스트")
-        || normalized_user_content.contains("체크리스트");
+        || normalized_user_content.contains("체크리스트")
+        || normalized_user_content.contains("작업전점검표")
+        || normalized_user_content.contains("점검표");
 
     let is_permit_related =
         response_content.contains("허가서") || response_content.contains("작업허가");
-    let is_checklist_related = response_content.contains("체크리스트") || is_checklist_request;
+    let is_checklist_related = response_content.contains("체크리스트")
+        || response_content.contains("점검표")
+        || is_checklist_request;
     let is_no_results = response_content.contains("없습니다")
         || response_content.contains("찾을 수")
         || response_content.contains("기록이");
@@ -2679,7 +2685,7 @@ fn extract_suggestions(user_content: &str, response_content: &str) -> Option<Vec
 
     if is_permit_related && needs_suggestions {
         return Some(
-            ["위험작업 허가서", "화기작업 허가서", "직접 입력"]
+            ["안전작업 허가서", "화기작업 허가서", "직접 입력"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),

@@ -442,7 +442,15 @@ pub fn message_bubble(props: &MessageProps) -> Html {
     // 버튼은 다른 액션 버튼과 같은 줄(message-actions)에 통합되고, 👎 선택 시 코멘트창이
     // 액션 줄 아래에 펼쳐진다. 👍는 즉시 제출, 같은 평가 재클릭은 취소(토글).
     // 평가는 현재 표시 중인 버전(current_response_page)에 귀속된다.
-    let show_feedback = is_assistant && msg.ui.is_none() && props.is_authenticated;
+    // 선택 버튼(suggestions)이 달린 "목록(선택 단계)" 메시지는 아직 평가할 답변이
+    // 아니라 작업구분을 고르는 중간 단계이므로 피드백을 숨긴다. 작업구분 선택 후
+    // 나오는 실제 답변(suggestions 없음)에만 노출한다.
+    let is_selection_step = msg
+        .suggestions
+        .as_ref()
+        .is_some_and(|s| !s.is_empty());
+    let show_feedback =
+        is_assistant && msg.ui.is_none() && !is_selection_step && props.is_authenticated;
     let (feedback_buttons_html, feedback_comment_html) = if show_feedback {
         let message_id = msg.id.clone();
         let agent_id = msg.agent_id.clone().unwrap_or_default();

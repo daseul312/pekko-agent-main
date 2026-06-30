@@ -54,9 +54,9 @@ pub struct ChatProps {
 fn example_questions_for(agent_id: Option<&str>) -> Vec<&'static str> {
     match agent_id {
         Some("ehs-permit-agent") => vec![
-            "오늘 확인 대기 중인 위험작업 허가 목록 보여줘",
+            "오늘 확인 대기 중인 안전작업 허가 목록 보여줘",
             "이번 주 작업 전 계획서 제출 현황 요약해줘",
-            "작업 전 체크리스트에서 미완료 항목 찾아줘",
+            "작업전 점검표에서 미완료 항목 찾아줘",
             "오늘 TBM 서명 미완료자 현황 보여줘",
         ],
         Some("ehs-inspection-agent") => vec![
@@ -90,7 +90,7 @@ fn example_questions_for(agent_id: Option<&str>) -> Vec<&'static str> {
             "수급업체 결재선과 대외문서 이력 검토해줘",
         ],
         _ => vec![
-            "현재 위험작업 현황 보여줘",
+            "현재 안전작업 현황 보여줘",
             "이번 달 점검 계획 요약해줘",
             "등록된 MSDS 목록 보여줘",
             "최근 사고 추세 분석해줘",

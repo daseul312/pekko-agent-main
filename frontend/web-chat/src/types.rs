@@ -469,7 +469,7 @@ impl AgentMeta {
             AgentMeta {
                 id: "ehs-permit-agent".into(),
                 name: "허가 관리".into(),
-                description: "위험작업 허가와 TBM 관리".into(),
+                description: "안전작업 허가와 TBM 관리".into(),
                 icon: "",
                 css_class: "permit",
             },
