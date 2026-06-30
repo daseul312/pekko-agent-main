@@ -55,7 +55,7 @@ fn example_questions_for(agent_id: Option<&str>) -> Vec<&'static str> {
     match agent_id {
         Some("ehs-permit-agent") => vec![
             "오늘 확인 대기 중인 안전작업 허가 목록 보여줘",
-            "이번 주 작업 전 계획서 제출 현황 요약해줘",
+            "승인된 작업계획서를 보고 싶어",
             "작업전 점검표에서 미완료 항목 찾아줘",
             "오늘 TBM 서명 미완료자 현황 보여줘",
         ],

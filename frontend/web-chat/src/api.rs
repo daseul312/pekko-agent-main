@@ -554,6 +554,23 @@ pub async fn fetch_notifications() -> Result<NotificationsResponse, String> {
     }
 }
 
+/// GET /api/permit/formal-work-types — 승인 작업계획서 작업종류 칩 목록.
+pub async fn fetch_formal_work_types() -> Result<Vec<FormalWorkType>, String> {
+    let url = api_url("/api/permit/formal-work-types");
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+    if resp.ok() {
+        resp.json::<FormalWorkTypesResponse>()
+            .await
+            .map(|r| r.work_types)
+            .map_err(|e| format!("Parse error: {e}"))
+    } else {
+        Err(format!("HTTP {}", resp.status()))
+    }
+}
+
 /// POST /api/notifications/:id/read — 알림 읽음.
 pub async fn mark_notification_read(id: &str) -> Result<(), String> {
     let url = api_url(&format!("/api/notifications/{id}/read"));

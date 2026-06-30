@@ -33,6 +33,18 @@ pub struct QueryResponse {
     pub chart_data: Option<ChartData>,
 }
 
+/// 정형작업 종류(Common.formal_work_type) 1건 — 승인 작업계획서 작업종류 칩.
+/// 프론트는 표시·매칭에 name만 사용한다(JSON의 code 필드는 serde가 무시).
+#[derive(Clone, Debug, Deserialize)]
+pub struct FormalWorkType {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct FormalWorkTypesResponse {
+    pub work_types: Vec<FormalWorkType>,
+}
+
 /// Live progress event streamed from the `/stream` endpoints (NDJSON).
 /// `Step` is a generic, upsert-by-label progress item.
 #[derive(Clone, Debug, Deserialize)]

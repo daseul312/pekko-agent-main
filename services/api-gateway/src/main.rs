@@ -491,6 +491,18 @@ struct ErrorResponse {
     code: String,
 }
 
+/// 정형작업 종류(Common.formal_work_type) 1건 — 승인 작업계획서 작업종류 칩.
+#[derive(Serialize)]
+struct FormalWorkType {
+    code: String,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct FormalWorkTypesResponse {
+    work_types: Vec<FormalWorkType>,
+}
+
 /// POST /api/share 요청. 프론트가 보유한 답변 본문을 스냅샷으로 보낸다
 /// (CoreDB 메시지에는 안정적 id가 없어 message_id로 재조회가 불가능하므로).
 #[derive(Deserialize)]
@@ -675,8 +687,16 @@ fn build_system_prompt(
     let agent_desc = match agent_id {
         "ehs-permit-agent" => {
             "당신은 EHS(환경안전보건) 허가 관리 전문 AI 에이전트입니다.\n\
-             역할: 안전작업 허가(PTW) 현황 조회/분석, 작업 허가 프로세스 안내, 안전작업 유형별 통계, 허가 승인/반려 현황 추적\n\
-             주요 테이블: dangerousworkmanagement(안전작업허가), tbmmanagement(TBM), accidentfreemanagement(무재해)"
+             역할: 안전작업 허가(PTW) 현황 조회/분석, 작업 허가 프로세스 안내, 안전작업 유형별 통계, 허가 승인/반려 현황 추적, 작업계획서 조회\n\
+             주요 테이블: dangerousworkmanagement(안전작업허가), tbmmanagement(TBM), accidentfreemanagement(무재해), public.\"PreWorkPlan\"(작업계획서), public.\"PreWorkCheckList\"(작업전 점검표), public.\"Common\"(공통코드)\n\
+             참고: PreWorkPlan, PreWorkCheckList, Common 등 대문자가 섞인 테이블명은 대소문자 보존을 위해 반드시 큰따옴표로 감싸세요(public.\"PreWorkPlan\").\n\
+             [승인된 작업계획서 조회 규칙]\n\
+             - \"작업계획서\"는 public.\"PreWorkPlan\" 테이블입니다(점검표 public.\"PreWorkCheckList\"와 다른 테이블이니 혼동 금지).\n\
+             - \"승인된 작업계획서\"는 \"applyStatus\"='승인' AND is_deleted='N' 인 행을 의미합니다. 승인 여부는 반드시 \"applyStatus\" 컬럼으로 판단하세요(use_yn은 승인 기준이 아님).\n\
+             - 작업 종류로 필터할 때는 \"workTypeName\"(=Common.commoncodename) 또는 \"workTypeCode\"(=Common.commoncode)로 한정하세요. 사용자가 '선택한 작업 종류:' 또는 '조회 기준 작업 유형:'으로 전달한 값을 그 기준으로 사용하세요.\n\
+             - 반드시 \"companyCode\"=현재 로그인 사용자의 회사코드로 한정하세요.\n\
+             - 작업 종류 코드/명 목록은 public.\"Common\"에서 searchcode='formal_work_type' AND useyn='Y' ORDER BY orderno 로 조회합니다.\n\
+             - PreWorkPlan 주요 컬럼: pwpNo(PK, 계획서번호), title(제목), \"applyStatus\"(상태: 승인/신청 등), \"workTypeCode\", \"workTypeName\", \"applyEmployeeId\"/\"applyEmployeeName\"(신청자), \"permitEmployeeName\"(허가자), \"createDate\"(작성일), \"companyCode\", use_yn, is_deleted."
         }
         "ehs-inspection-agent" => {
             "당신은 EHS(환경안전보건) 점검 관리 전문 AI 에이전트입니다.\n\
@@ -1605,6 +1625,12 @@ fn is_prework_checklist_request(content: &str) -> bool {
         || (compact.contains("작업전") && compact.contains("점검표"))
 }
 
+/// "승인된 작업계획서" 요청 감지(작업계획서 + 승인). permit 도메인으로 라우팅한다.
+fn is_approved_workplan_request(content: &str) -> bool {
+    let compact = compact_lower(content);
+    compact.contains("작업계획서") && compact.contains("승인")
+}
+
 fn is_round_inspection_request(content: &str) -> bool {
     let compact = compact_lower(content);
 
@@ -1654,6 +1680,14 @@ fn routing_fallback(content: &str) -> RoutingDecision {
         };
     }
 
+    if is_approved_workplan_request(content) {
+        return RoutingDecision {
+            primary_agent_id: "ehs-permit-agent".to_string(),
+            agent_ids: vec!["ehs-permit-agent".to_string()],
+            rationale: "approved_workplan_is_permit_domain".to_string(),
+        };
+    }
+
     if is_round_inspection_request(content) && !has_cross_domain_routing_hint(content) {
         return RoutingDecision {
             primary_agent_id: "ehs-inspection-agent".to_string(),
@@ -1668,7 +1702,7 @@ fn routing_fallback(content: &str) -> RoutingDecision {
         (
             "ehs-permit-agent",
             &[
-                "permit", "허가", "작업허가", "안전작업", "tbm", "작업전", "pre-work", "화기",
+                "permit", "허가", "작업허가", "안전작업", "작업계획서", "tbm", "작업전", "pre-work", "화기",
                 "밀폐공간",
             ],
         ),
@@ -1905,6 +1939,7 @@ Rules:\n\
 - primary_agent_id must be the best page for the UI to navigate to first.\n\
 - Keep rationale short.\n\
 - Queries containing `Pre-work checklist`, `Pre-work Checklist`, or `pre-work checklist` must be sent to `ehs-permit-agent`.\n\
+- Queries about 승인된 작업계획서 / approved work-plan (containing 작업계획서 with 승인) must be sent to `ehs-permit-agent`.\n\
 - Queries containing `Routine Inspection`, `Periodic Routine Inspection`, or `RoundInspectionManagement` should be sent to `ehs-inspection-agent`.\n\
 - Queries about education, training, education plan, completion, incomplete education, completed education, target trainees, test score, pass score, retest, certificate, survey, or education notifications must be sent to `ehs-education-agent`, not `ehs-inspection-agent`.\n\
 - Korean queries containing `교육`, `교육계획`, `이수`, `미이수`, `수료`, `대상자`, `재시험`, `시험`, `점수`, `통과점수`, `설문`, or `교육 알림` must be sent to `ehs-education-agent`.\n\
@@ -3283,6 +3318,39 @@ async fn get_notifications(
     Ok(Json(NotificationsResponse { items, unread }))
 }
 
+/// GET /api/permit/formal-work-types - 승인 작업계획서 작업종류 칩 목록.
+/// public."Common"의 formal_work_type 공통코드(useyn='Y')를 orderno순으로 반환한다.
+async fn get_formal_work_types(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+) -> Result<Json<FormalWorkTypesResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // 로그인 게이트(회사 스코프 답변과 일관). Common은 전사 공통이라 회사 필터는 두지 않는다.
+    let _identity = auth.ok_or_else(unauthorized_err)?;
+    let rows = sqlx::query_as::<_, (String, String)>(
+        r#"SELECT commoncode, commoncodename
+           FROM public."Common"
+           WHERE searchcode = 'formal_work_type' AND useyn = 'Y'
+           ORDER BY orderno"#,
+    )
+    .fetch_all(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| {
+        error!(error = %e, "formal_work_type 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("작업종류 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+    let work_types = rows
+        .into_iter()
+        .map(|(code, name)| FormalWorkType { code, name })
+        .collect();
+    Ok(Json(FormalWorkTypesResponse { work_types }))
+}
+
 /// POST /api/notifications/:id/read - 알림 읽음 처리(소유자).
 async fn mark_notification_read(
     Path(notification_id): Path<String>,
@@ -3775,6 +3843,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/admin/feedback/resolve", post(resolve_feedback))
         .route("/api/admin/feedback/resolve/send", post(send_resolution))
         .route("/api/notifications", get(get_notifications))
+        .route("/api/permit/formal-work-types", get(get_formal_work_types))
         .route("/api/notifications/:id/read", post(mark_notification_read))
         .route("/api/resolution/:feedback_key", get(get_resolution))
         .route("/api/resolution/:feedback_key/reverify", post(submit_reverify))

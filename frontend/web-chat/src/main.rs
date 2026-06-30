@@ -111,11 +111,10 @@ fn canonicalize_checklist_work_type(
     }
 }
 
-fn is_prework_plan_submission_request(content: &str) -> bool {
+/// "승인된 작업계획서" 요청 감지(작업계획서 + 승인). 동적 작업종류 칩 플로의 진입점.
+fn is_approved_workplan_request(content: &str) -> bool {
     let normalized = normalize_for_matching(content);
-    normalized.contains("작업전계획서")
-        && (normalized.contains("제출현황")
-            || (normalized.contains("제출") && normalized.contains("현황")))
+    normalized.contains("작업계획서") && normalized.contains("승인")
 }
 
 fn is_pending_permit_list_request(content: &str) -> bool {
@@ -160,13 +159,16 @@ fn build_request_content(messages: &[ChatMessage], content: &str) -> String {
     let selected_content = content.trim();
     let normalized_selected_content = normalize_for_matching(selected_content);
 
-    if is_prework_plan_submission_request(base_content)
-        && PENDING_PERMIT_WORK_TYPES
-            .iter()
-            .any(|work_type| normalize_for_matching(work_type) == normalized_selected_content)
-    {
+    // 승인된 작업계획서: 작업종류 칩 클릭 → PreWorkPlan에서 승인 정의(applyStatus='승인' AND
+    // is_deleted='N')와 선택 종류로 한정한 실제 조회 쿼리로 재작성(백엔드로 전송).
+    if is_approved_workplan_request(base_content) {
         return format!(
-            "{base_content}\n선택한 항목: {selected_content}\n조회 기준 작업 유형: {selected_content}\n위 선택을 반영해서 다시 답변해줘."
+            "{base_content}\n선택한 작업 종류: {selected_content}\n\
+             public.\"PreWorkPlan\"에서 \"applyStatus\"='승인' AND is_deleted='N' 이고 \
+             \"workTypeName\"='{selected_content}'(또는 그에 대응하는 \"workTypeCode\")이며 \
+             내 회사(companyCode)로 한정된 승인된 작업계획서를 조회해서 목록으로 보여줘. \
+             표 컬럼은 pwpNo(계획서번호), title(제목), \"workTypeName\"(작업종류), \
+             \"applyStatus\"(상태), \"applyEmployeeName\"(신청자), \"createDate\"(작성일)로 보여줘."
         );
     }
 
@@ -400,6 +402,31 @@ fn build_pending_permit_work_type_prompt_message() -> ChatMessage {
                 .map(str::to_string)
                 .collect(),
         ),
+        old_new_comparison: None,
+        chart_data: None,
+        response_versions: vec![],
+        current_response_index: 0,
+        ui: None,
+        board_post_target: None,
+        process_steps: Vec::new(),
+        routing_note: None,
+        agent_id: None,
+        feedback: None,
+    }
+}
+
+/// 승인된 작업계획서 플로의 로컬 어시스턴트 메시지(로딩/칩/에러 공용).
+/// suggestions=Some이면 칩이 노출되고 입력이 비활성화된다(선택 강제). None이면 입력 재활성.
+fn build_approved_workplan_message(content: &str, suggestions: Option<Vec<String>>) -> ChatMessage {
+    ChatMessage {
+        id: Uuid::new_v4().to_string(),
+        role: MessageRole::Assistant,
+        content: content.to_string(),
+        request_content: None,
+        tools_used: vec![],
+        token_usage: None,
+        timestamp: chrono::Utc::now(),
+        suggestions,
         old_new_comparison: None,
         chart_data: None,
         response_versions: vec![],
@@ -1682,6 +1709,63 @@ fn app() -> Html {
                 return;
             }
 
+            // 승인된 작업계획서: 작업종류 칩을 DB(Common)에서 비동기로 가져와 선택지를 띄운다.
+            // 먼저 로딩 메시지를 반영하고, fetch 완료 후 칩(또는 에러) 메시지로 교체한다.
+            if is_approved_workplan_request(&content) {
+                let mut loading_msgs = new_msgs.clone();
+                loading_msgs.push(build_approved_workplan_message(
+                    "작업 종류를 불러오는 중입니다…",
+                    None,
+                ));
+                apply_local_messages(
+                    messages.clone(),
+                    session_id.clone(),
+                    sessions.clone(),
+                    selected_agent_id.clone(),
+                    use_router.clone(),
+                    active_routed_agent_ids.clone(),
+                    loading_msgs,
+                    content.clone(),
+                );
+
+                let messages = messages.clone();
+                let session_id = session_id.clone();
+                let sessions = sessions.clone();
+                let selected_agent_id = selected_agent_id.clone();
+                let use_router = use_router.clone();
+                let active_routed_agent_ids = active_routed_agent_ids.clone();
+                let base_msgs = new_msgs; // [.., user] — 로딩 제외 스냅샷
+                let content_c = content.clone();
+                spawn_local(async move {
+                    let final_msg = match api::fetch_formal_work_types().await {
+                        Ok(list) if !list.is_empty() => build_approved_workplan_message(
+                            "작업 종류를 선택하세요.",
+                            Some(list.into_iter().map(|w| w.name).collect()),
+                        ),
+                        Ok(_) => {
+                            build_approved_workplan_message("표시할 작업 종류가 없습니다.", None)
+                        }
+                        Err(_) => build_approved_workplan_message(
+                            "작업 종류를 불러오지 못했습니다. 다시 시도해 주세요.",
+                            None,
+                        ),
+                    };
+                    let mut final_msgs = base_msgs;
+                    final_msgs.push(final_msg);
+                    apply_local_messages(
+                        messages,
+                        session_id,
+                        sessions,
+                        selected_agent_id,
+                        use_router,
+                        active_routed_agent_ids,
+                        final_msgs,
+                        content_c,
+                    );
+                });
+                return;
+            }
+
             if is_pending_permit_list_request(&content) {
                 new_msgs.push(build_pending_permit_work_type_prompt_message());
                 apply_local_messages(
@@ -2613,8 +2697,17 @@ fn app() -> Html {
 
 fn extract_suggestions(user_content: &str, response_content: &str) -> Option<Vec<String>> {
     let normalized_user_content = normalize_for_matching(user_content);
+
+    // 승인된 작업계획서: 작업종류 칩 클릭 후 재작성된 쿼리("선택한 작업 종류:" 포함)에는
+    // 칩을 다시 띄우지 않는다(허가 관련 응답이 generic 칩을 재유발하는 것 방지).
+    if normalized_user_content.contains("선택한작업종류")
+        || (normalized_user_content.contains("작업계획서")
+            && normalized_user_content.contains("선택한"))
+    {
+        return None;
+    }
+
     let is_pending_permit_list_request = is_pending_permit_list_request(user_content);
-    let is_prework_plan_submission_query = is_prework_plan_submission_request(user_content);
     let is_checklist_request = normalized_user_content.contains("작업전체크리스트")
         || normalized_user_content.contains("체크리스트")
         || normalized_user_content.contains("작업전점검표")
@@ -2654,15 +2747,6 @@ fn extract_suggestions(user_content: &str, response_content: &str) -> Option<Vec
 
     if is_checklist_work_type_selection {
         return None;
-    }
-
-    if is_prework_plan_submission_query && is_asking_type {
-        return Some(
-            PENDING_PERMIT_WORK_TYPES
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-        );
     }
 
     if is_checklist_related && is_asking_type {
