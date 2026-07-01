@@ -46,6 +46,43 @@ fn answer_panel(title: &str, content: &str, chart_json: &Option<String>, canvas_
     }
 }
 
+/// 로딩 중 실제 비교 레이아웃(질문 바 + 2단 답변) 형태의 스켈레톤을 렌더.
+/// `title`/`sub`는 상단 상태 문구, 나머지는 shimmer 자리 표시.
+fn loading_skeleton(title: &str, sub: Option<&str>) -> Html {
+    // 각 칼럼의 줄 길이 패턴(true = 짧은 줄).
+    let lines = |pattern: &[bool]| -> Html {
+        pattern
+            .iter()
+            .map(|&short| html! { <div class={classes!("sk-line", short.then_some("short"))}></div> })
+            .collect::<Html>()
+    };
+    let sub_html = sub
+        .map(|s| html! { <div class="resolution-loading-sub">{ s }</div> })
+        .unwrap_or_default();
+    html! {
+        <div class="resolution-skeleton">
+            <div class="resolution-skeleton-status">
+                <div class="resolution-spinner"></div>
+                <div class="resolution-skeleton-text">
+                    <div class="resolution-loading-title">{ title }</div>
+                    { sub_html }
+                </div>
+            </div>
+            <div class="sk-question"></div>
+            <div class="sk-cols">
+                <div class="sk-col">
+                    <div class="sk-col-title"></div>
+                    { lines(&[false, false, true, false, true]) }
+                </div>
+                <div class="sk-col">
+                    <div class="sk-col-title"></div>
+                    { lines(&[false, true, false, false, true]) }
+                </div>
+            </div>
+        </div>
+    }
+}
+
 #[function_component(ResolutionView)]
 pub fn resolution_view(props: &ResolutionViewProps) -> Html {
     let state = use_state(|| ViewState::Loading);
@@ -77,12 +114,14 @@ pub fn resolution_view(props: &ResolutionViewProps) -> Html {
 
     let body = match &*state {
         ViewState::Loading => {
-            let msg = if props.admin {
-                "개선 답변을 생성하는 중입니다... (수 초 소요)"
+            if props.admin {
+                loading_skeleton(
+                    "개선 답변을 생성하고 있어요",
+                    Some("이전 답변과 비교할 새 답변을 만드는 중입니다. 수 초 정도 걸려요."),
+                )
             } else {
-                "불러오는 중..."
-            };
-            html! { <div class="admin-fb-status">{ msg }</div> }
+                loading_skeleton("불러오는 중...", None)
+            }
         }
         ViewState::Error(FeedbackStatsError::Unauthorized) => {
             let key = props.feedback_key.clone();
