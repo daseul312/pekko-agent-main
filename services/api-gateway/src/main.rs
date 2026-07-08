@@ -661,6 +661,22 @@ fn period_cutoff(period: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 struct StatsQuery {
     #[serde(default)]
     period: Option<String>,
+    /// 추세 집계 단위: day|week|month(기본값).
+    #[serde(default)]
+    granularity: Option<String>,
+}
+
+/// 추세 버킷 키(정렬 가능한 형태)를 생성한다: day="YYYY-MM-DD", week=ISO 주(YYYY-Www), month(기본)="YYYY-MM".
+fn trend_bucket_key(dt: &chrono::DateTime<chrono::FixedOffset>, granularity: &str) -> String {
+    match granularity {
+        "day" => dt.format("%Y-%m-%d").to_string(),
+        "week" => {
+            use chrono::Datelike;
+            let iso = dt.iso_week();
+            format!("{}-W{:02}", iso.year(), iso.week())
+        }
+        _ => dt.format("%Y-%m").to_string(),
+    }
 }
 
 /// comments 페이지네이션 쿼리.
@@ -2839,13 +2855,14 @@ fn normalize_comment(comment: &Option<String>) -> Option<String> {
         .filter(|c| !c.trim().is_empty() && c != "null")
 }
 
-/// GET /api/admin/feedback/stats?period=month|3m|all - 대시보드 집계.
+/// GET /api/admin/feedback/stats?period=month|3m|all&granularity=day|week|month - 대시보드 집계.
 async fn get_feedback_stats(
     State(state): State<AppState>,
     OptionalAuth(auth): OptionalAuth,
     Query(q): Query<StatsQuery>,
 ) -> Result<Json<FeedbackStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
     let period = q.period.as_deref().unwrap_or("all");
+    let granularity = q.granularity.as_deref().unwrap_or("month");
     let company_code = auth.as_ref().map(|a| a.company_code.clone()).unwrap_or_default();
     let records = load_feedback_for_admin(&state, auth, period).await?;
 
@@ -2854,7 +2871,7 @@ async fn get_feedback_stats(
     let mut comment_count = 0i64;
     let mut by_agent: HashMap<String, AgentRate> = HashMap::new();
     let mut tag_map: HashMap<String, i64> = HashMap::new();
-    // 월별 추세: "YYYY-MM" → (up, down).
+    // 추세: 버킷 키(일/주/월) → (up, down).
     let mut trend_map: HashMap<String, (i64, i64)> = HashMap::new();
 
     for r in &records {
@@ -2888,10 +2905,10 @@ async fn get_feedback_stats(
             }
         }
 
-        // 월 키(YYYY-MM). 파싱 실패 행은 추세에서 제외.
+        // 추세 버킷 키(일/주/월). 파싱 실패 행은 추세에서 제외.
         if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&r.created_at) {
-            let month = dt.format("%Y-%m").to_string();
-            let e = trend_map.entry(month).or_insert((0, 0));
+            let bucket = trend_bucket_key(&dt, granularity);
+            let e = trend_map.entry(bucket).or_insert((0, 0));
             if is_up {
                 e.0 += 1;
             } else if is_down {

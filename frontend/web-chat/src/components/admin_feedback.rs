@@ -101,14 +101,19 @@ fn donut_data(tags: &[TagCount]) -> Option<ChartData> {
     })
 }
 
-/// 월별 트렌드 라인 ChartData(긍정/개선필요 2계열). 비어있으면 None.
-fn trend_data(trend: &[TrendPoint]) -> Option<ChartData> {
+/// 추세 라인 ChartData(긍정/개선필요 2계열). 비어있으면 None.
+fn trend_data(trend: &[TrendPoint], granularity: &str) -> Option<ChartData> {
     if trend.is_empty() {
         return None;
     }
+    let title = match granularity {
+        "day" => "일별 추세",
+        "week" => "주간 추세",
+        _ => "월별 추세",
+    };
     Some(ChartData {
         chart_type: "line".to_string(),
-        title: "월별 추세".to_string(),
+        title: title.to_string(),
         labels: trend.iter().map(|t| t.month.clone()).collect(),
         series: vec![
             ChartSeries {
@@ -213,30 +218,42 @@ fn reverify_row(row: &ReverifyRow) -> Html {
 pub fn admin_feedback() -> Html {
     // "all" | "month" | "3m".
     let period = use_state(|| "all".to_string());
+    // "day" | "week" | "month".
+    let granularity = use_state(|| "month".to_string());
     let stats = use_state(|| StatsView::Loading);
     let comments = use_state(Vec::<CommentRow>::new);
     let comments_total = use_state(|| 0i64);
     let loading_more = use_state(|| false);
     let reverify = use_state(Vec::<ReverifyRow>::new);
 
-    // 기간 변경 시 통계 + 코멘트 1페이지 + 부정확 재확인 목록 재조회.
+    // 기간 또는 추세 집계 단위 변경 시 통계 재조회.
     {
         let stats = stats.clone();
+        use_effect_with(((*period).clone(), (*granularity).clone()), move |(p, g)| {
+            let p = p.clone();
+            let g = g.clone();
+            stats.set(StatsView::Loading);
+            spawn_local(async move {
+                match api::fetch_feedback_stats(&p, &g).await {
+                    Ok(s) => stats.set(StatsView::Loaded(s)),
+                    Err(e) => stats.set(StatsView::Error(e)),
+                }
+            });
+            || ()
+        });
+    }
+
+    // 기간 변경 시에만 코멘트 1페이지 + 부정확 재확인 목록 재조회(추세 단위 변경과 무관).
+    {
         let comments = comments.clone();
         let comments_total = comments_total.clone();
         let reverify = reverify.clone();
-        let period_val = (*period).clone();
-        use_effect_with(period_val.clone(), move |p| {
+        use_effect_with((*period).clone(), move |p| {
             let p = p.clone();
-            stats.set(StatsView::Loading);
             comments.set(Vec::new());
             comments_total.set(0);
             reverify.set(Vec::new());
             spawn_local(async move {
-                match api::fetch_feedback_stats(&p).await {
-                    Ok(s) => stats.set(StatsView::Loaded(s)),
-                    Err(e) => stats.set(StatsView::Error(e)),
-                }
                 if let Ok(c) = api::fetch_feedback_comments(&p, COMMENTS_PAGE, 0).await {
                     comments.set(c.items);
                     comments_total.set(c.total);
@@ -296,6 +313,28 @@ pub fn admin_feedback() -> Html {
         }
     };
 
+    // 추세 집계 단위 칩(일별/주간/월별).
+    let granularity_chips = {
+        let cur = (*granularity).clone();
+        let make = |val: &'static str, label: &'static str| {
+            let granularity = granularity.clone();
+            let active = cur == val;
+            let on_click = Callback::from(move |_: MouseEvent| granularity.set(val.to_string()));
+            html! {
+                <button class={classes!("fb-period-chip", "sm", active.then_some("active"))} onclick={on_click}>
+                    { label }
+                </button>
+            }
+        };
+        html! {
+            <div class="fb-period-bar fb-trend-granularity">
+                { make("day", "일별") }
+                { make("week", "주간") }
+                { make("month", "월별") }
+            </div>
+        }
+    };
+
     let body = match &*stats {
         StatsView::Loading => html! { <div class="admin-fb-status">{ "불러오는 중..." }</div> },
         StatsView::Error(FeedbackStatsError::Unauthorized) => {
@@ -351,8 +390,8 @@ pub fn admin_feedback() -> Html {
                 </div>
             };
 
-            // 월별 트렌드.
-            let trend = match trend_data(&s.trend) {
+            // 추세(일별/주간/월별 선택 가능).
+            let trend = match trend_data(&s.trend, &*granularity) {
                 Some(data) => html! { <ChartBlock message_id={"fb-trend".to_string()} data={data} /> },
                 None => html! { <div class="fb-empty">{ "데이터가 없습니다" }</div> },
             };
@@ -404,7 +443,10 @@ pub fn admin_feedback() -> Html {
                         </section>
                     </div>
                     <section class="fb-section">
-                        <h3 class="fb-section-title">{ "월별 추세" }</h3>
+                        <div class="fb-section-head">
+                            <h3 class="fb-section-title">{ "추세" }</h3>
+                            { granularity_chips }
+                        </div>
                         { trend }
                     </section>
                     <section class="fb-section">

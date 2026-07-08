@@ -387,12 +387,15 @@ pub async fn fetch_shared(share_id: &str) -> Result<SharedAnswer, ShareFetchErro
     }
 }
 
-/// GET /api/admin/feedback/stats?period= — 회사+기간 단위 대시보드 집계(허용목록 사원만).
+/// GET /api/admin/feedback/stats?period=&granularity= — 회사+기간 단위 대시보드 집계(허용목록 사원만).
 /// 상태코드별로 `FeedbackStatsError`를 구분해 관리자 페이지가 로그인/권한/오류를 분기한다.
 pub async fn fetch_feedback_stats(
     period: &str,
+    granularity: &str,
 ) -> Result<FeedbackStatsResponse, FeedbackStatsError> {
-    let url = api_url(&format!("/api/admin/feedback/stats?period={period}"));
+    let url = api_url(&format!(
+        "/api/admin/feedback/stats?period={period}&granularity={granularity}"
+    ));
     let resp = with_credentials(Request::get(&url))
         .send()
         .await

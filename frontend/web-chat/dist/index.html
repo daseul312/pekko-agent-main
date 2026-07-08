@@ -6,8 +6,8 @@
     <title>Core Agentic AI — EHS AI 채팅</title>
     
 <script type="module">
-import init, * as bindings from '/pekko-agent-web-chat-9233f13dc987dade.js';
-const wasm = await init({ module_or_path: '/pekko-agent-web-chat-9233f13dc987dade_bg.wasm' });
+import init, * as bindings from '/pekko-agent-web-chat-c56c654e9d87ff99.js';
+const wasm = await init({ module_or_path: '/pekko-agent-web-chat-c56c654e9d87ff99_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -3306,6 +3306,16 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         color: var(--text);
         margin: 0 0 14px;
       }
+      .fb-section-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+      .fb-section-head .fb-section-title { margin: 0; }
+      .fb-trend-granularity { width: auto; gap: 6px; }
+      .fb-period-chip.sm { padding: 4px 12px; font-size: 12px; }
       .fb-empty { font-size: 13px; color: var(--muted); padding: 12px 0; text-align: center; }
       /* 에이전트별 긍정률 */
       .fb-agent-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
@@ -5399,7 +5409,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         });
       }
     </script>
-  <link rel="modulepreload" href="/pekko-agent-web-chat-9233f13dc987dade.js" crossorigin="anonymous" integrity="sha384-jwv2NjCGbayghygG2Tq2CxBaPbemq706nK2UOBGPcB2Wcqcy8iMUNEJKzl9Y+2oB"><link rel="preload" href="/pekko-agent-web-chat-9233f13dc987dade_bg.wasm" crossorigin="anonymous" integrity="sha384-1fX4W3+1tWsgMNyKW+pIBjBXodGgGRMGuVUqeHnUszajzWaloMnG9Jlimn0NgmpC" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/pekko-agent-web-chat-c56c654e9d87ff99.js" crossorigin="anonymous" integrity="sha384-3Hr0U66hvfexcSCZECWzG+eJMAQ0Q584QUcU4AUk2wDfMfOE6dWlXzIgwj/zn2S6"><link rel="preload" href="/pekko-agent-web-chat-c56c654e9d87ff99_bg.wasm" crossorigin="anonymous" integrity="sha384-GH8Q87u7T4g3XukQV8KMPzpJUPa03uv9VlIlPLohdRuKLv1s4fd/zvgY3P4Fyfw/" as="fetch" type="application/wasm"></head>
   <body><script>"use strict";
 
 (function () {

@@ -24,6 +24,40 @@ const THEME_STORAGE_KEY: &str = "pekko_theme_dark";
 
 const STORAGE_KEY: &str = "pekko_chat_sessions";
 const FAVORITES_STORAGE_KEY: &str = "pekko_favorite_questions";
+
+thread_local! {
+    /// 현재 로그인 사용자에 종속된 세션 저장 키. 로그인 상태가 바뀔 때 갱신하며,
+    /// 스트리밍/폴링 등 장시간 도는 태스크가 실행 시점의 계정 키로 localStorage를
+    /// 읽고 쓰도록 한다(WASM은 단일 스레드라 thread_local로 안전하게 공유 가능).
+    static SESSIONS_KEY: std::cell::RefCell<String> =
+        std::cell::RefCell::new(guest_sessions_key());
+}
+
+/// 비로그인(게스트) 상태의 세션 저장 키.
+fn guest_sessions_key() -> String {
+    format!("{STORAGE_KEY}:__guest__")
+}
+
+/// 로그인 사용자별 세션 저장 키. 계정마다 대화기록을 분리한다.
+fn user_sessions_key(user_id: &str) -> String {
+    format!("{STORAGE_KEY}:{user_id}")
+}
+
+/// 현재 활성 세션 저장 키를 반환한다. localStorage 접근은 모두 이 키를 거쳐,
+/// 로그인한 계정별로 대화기록이 분리되도록 한다.
+fn sessions_storage_key() -> String {
+    SESSIONS_KEY.with(|k| k.borrow().clone())
+}
+
+/// 로그인 상태 변화에 맞춰 활성 세션 키를 설정한다(로그인 시 사용자 키, 비로그인 시 게스트 키).
+fn set_active_sessions_key(user: Option<&AuthUser>) {
+    let key = match user {
+        Some(u) => user_sessions_key(&u.id),
+        None => guest_sessions_key(),
+    };
+    SESSIONS_KEY.with(|k| *k.borrow_mut() = key);
+}
+
 const PENDING_PERMIT_WORK_TYPES: [&str; 10] = [
     "공통작업",
     "화기작업",
@@ -694,7 +728,7 @@ fn submit_query(
     // 동시 진행 중인 다른 질문의 갱신을 덮어쓰지 않도록 항상 localStorage의 최신 목록을 기준으로 한다.
     {
         let mut current_sessions =
-            LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY).unwrap_or_default();
+            LocalStorage::get::<Vec<ChatSession>>(sessions_storage_key()).unwrap_or_default();
         if let Some(idx) = current_sessions.iter().position(|s| s.id == sid) {
             current_sessions[idx].messages = current_msgs.clone();
             if !is_regeneration {
@@ -850,7 +884,7 @@ fn submit_query(
 
                 // 동시 진행 중인 다른 질문의 변경을 덮어쓰지 않도록 최신 목록을 localStorage에서 읽는다.
                 let mut current_sessions =
-                    LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY).unwrap_or_default();
+                    LocalStorage::get::<Vec<ChatSession>>(sessions_storage_key()).unwrap_or_default();
 
                 if let Some(idx) = current_sessions.iter().position(|s| s.id == new_sid) {
                     current_sessions[idx].agent_id = resp.agent_id.clone();
@@ -883,7 +917,7 @@ fn submit_query(
                     spawn_local(async move {
                         if let Ok(summary_title) = api::fetch_session_summary(new_sid).await {
                             let mut s_list =
-                                LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY).unwrap_or_default();
+                                LocalStorage::get::<Vec<ChatSession>>(sessions_storage_key()).unwrap_or_default();
                             if let Some(id) = s_list.iter().position(|s| s.id == new_sid) {
                                 s_list[id].title = summary_title;
                                 sessions_inner.set(s_list);
@@ -923,7 +957,7 @@ fn submit_query(
                 }
                 // 실패 시에도 대기 상태를 풀어, 재진입 폴링이 무한 대기하지 않도록 한다.
                 let mut current_sessions =
-                    LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY).unwrap_or_default();
+                    LocalStorage::get::<Vec<ChatSession>>(sessions_storage_key()).unwrap_or_default();
                 if let Some(idx) = current_sessions.iter().position(|s| s.id == sid) {
                     current_sessions[idx].pending = false;
                     sessions_clone.set(current_sessions);
@@ -1032,8 +1066,10 @@ fn app() -> Html {
     let toast_dismissed_ref = use_mut_ref(|| std::collections::HashSet::<Uuid>::new());
     let toast_timed_ref = use_mut_ref(|| std::collections::HashSet::<Uuid>::new());
     let toast_tick = use_state(|| 0u32);
+    // 세션은 현재 로그인 계정 키로 불러온다. 마운트 시점엔 아직 인증 복원(fetch_me) 전이라
+    // 게스트 키로 로드하고, 로그인 사용자가 확정되면 아래 effect에서 해당 계정 기록으로 교체한다.
     let sessions =
-        use_state(|| LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY).unwrap_or_default());
+        use_state(|| LocalStorage::get::<Vec<ChatSession>>(sessions_storage_key()).unwrap_or_default());
     // 즐겨찾기 질문 템플릿(localStorage 보관). 원클릭 재질문 대기열은 pending_fav_send로 처리.
     let favorites = use_state(|| {
         LocalStorage::get::<Vec<FavoriteQuestion>>(FAVORITES_STORAGE_KEY).unwrap_or_default()
@@ -1074,7 +1110,7 @@ fn app() -> Html {
     {
         let sessions_state = sessions.clone();
         use_effect_with((*sessions_state).clone(), move |s| {
-            let _ = LocalStorage::set(STORAGE_KEY, s);
+            let _ = LocalStorage::set(sessions_storage_key(), s);
             || ()
         });
     }
@@ -1084,6 +1120,19 @@ fn app() -> Html {
         let favorites_state = favorites.clone();
         use_effect_with((*favorites_state).clone(), move |f| {
             let _ = LocalStorage::set(FAVORITES_STORAGE_KEY, f);
+            || ()
+        });
+    }
+
+    // 로그인 계정이 바뀌면(로그인/로그아웃/새로고침 복원) 활성 세션 키를 그 계정 키로 바꾸고,
+    // 해당 계정의 대화기록을 다시 불러온다. 이렇게 해야 A계정에서 쓴 대화가 B계정에는 보이지 않는다.
+    {
+        let sessions = sessions.clone();
+        let auth_user = auth_user.clone();
+        let auth_uid = (*auth_user).as_ref().map(|u| u.id.clone());
+        use_effect_with(auth_uid, move |_| {
+            set_active_sessions_key((*auth_user).as_ref());
+            sessions.set(LocalStorage::get::<Vec<ChatSession>>(sessions_storage_key()).unwrap_or_default());
             || ()
         });
     }
@@ -1184,19 +1233,23 @@ fn app() -> Html {
         });
     }
 
-    // 마운트 시: 이전 세션에서 답변 대기(pending)로 남은 대화를 폴링해 답변을 이어받는다.
+    // 로그인 계정이 확정/변경될 때: 그 계정에서 답변 대기(pending)로 남은 대화를 폴링해 답변을 이어받는다.
     // (창을 닫았다 다시 연 경우의 복구 경로. 현재 탭에서 진행 중인 전송은 스트림 태스크가 처리.)
+    // 계정별 세션 로드가 위 effect에서 끝난 뒤 최신 목록을 localStorage에서 직접 읽는다.
     {
         let sessions = sessions.clone();
         let messages = messages.clone();
         let is_loading = is_loading.clone();
         let current_sid_ref = current_sid_ref.clone();
-        use_effect_with((), move |_| {
-            let pending_ids: Vec<Uuid> = (*sessions)
-                .iter()
-                .filter(|s| s.pending)
-                .map(|s| s.id)
-                .collect();
+        let auth_uid = (*auth_user).as_ref().map(|u| u.id.clone());
+        use_effect_with(auth_uid, move |_| {
+            let pending_ids: Vec<Uuid> =
+                LocalStorage::get::<Vec<ChatSession>>(sessions_storage_key())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|s| s.pending)
+                    .map(|s| s.id)
+                    .collect();
             for pid in pending_ids {
                 let sessions = sessions.clone();
                 let messages = messages.clone();
@@ -1223,7 +1276,7 @@ fn app() -> Html {
                             .unwrap_or_default();
 
                         // 동시 수정에 안전하도록 최신 세션 목록을 localStorage에서 읽어 갱신한다.
-                        let mut list = LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY)
+                        let mut list = LocalStorage::get::<Vec<ChatSession>>(sessions_storage_key())
                             .unwrap_or_default();
                         if let Some(idx) = list.iter().position(|s| s.id == pid) {
                             let already = list[idx]
@@ -1253,7 +1306,7 @@ fn app() -> Html {
                     }
                     // 타임아웃: 무한 폴링 방지를 위해 대기 상태를 해제한다.
                     let mut list =
-                        LocalStorage::get::<Vec<ChatSession>>(STORAGE_KEY).unwrap_or_default();
+                        LocalStorage::get::<Vec<ChatSession>>(sessions_storage_key()).unwrap_or_default();
                     if let Some(idx) = list.iter().position(|s| s.id == pid) {
                         if list[idx].pending {
                             list[idx].pending = false;
@@ -1278,11 +1331,16 @@ fn app() -> Html {
 
     let on_logout = {
         let auth_user = auth_user.clone();
+        let login_id = login_id.clone();
+        let login_password = login_password.clone();
         Callback::from(move |_: ()| {
             spawn_local(async move {
                 api::logout().await;
             });
             auth_user.set(None);
+            // 로그아웃 시 이전 아이디/비밀번호가 로그인 팝업에 남지 않도록 비운다.
+            login_id.set(String::new());
+            login_password.set(String::new());
         })
     };
 
@@ -1346,9 +1404,11 @@ fn app() -> Html {
         let is_login_modal_open = is_login_modal_open.clone();
         let login_error = login_error.clone();
         let login_password = login_password.clone();
+        let login_id = login_id.clone();
         Callback::from(move |_: MouseEvent| {
             login_error.set(None);
             login_password.set(String::new());
+            login_id.set(String::new());
             is_login_modal_open.set(false);
         })
     };
@@ -2543,7 +2603,13 @@ fn app() -> Html {
             { if *is_login_modal_open {
                 let on_close = {
                     let is_login_modal_open = is_login_modal_open.clone();
-                    Callback::from(move |_: MouseEvent| is_login_modal_open.set(false))
+                    let login_password = login_password.clone();
+                    let login_id = login_id.clone();
+                    Callback::from(move |_: MouseEvent| {
+                        is_login_modal_open.set(false);
+                        login_password.set(String::new());
+                        login_id.set(String::new());
+                    })
                 };
                 let on_id_input = {
                     let login_id = login_id.clone();
@@ -2589,6 +2655,7 @@ fn app() -> Html {
                                         oninput={on_id_input}
                                         onkeydown={on_login_keydown.clone()}
                                         autofocus=true
+                                        autocomplete="username"
                                     />
                                 </div>
                                 <div class="form-group">
@@ -2599,6 +2666,7 @@ fn app() -> Html {
                                             value={(*login_password).clone()}
                                             oninput={on_password_input}
                                             onkeydown={on_login_keydown.clone()}
+                                            autocomplete="new-password"
                                         />
                                         <button
                                             type="button"
