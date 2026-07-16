@@ -1,13 +1,15 @@
 use uuid::Uuid;
+use wasm_bindgen_futures::spawn_local;
 use web_sys::{Element, ScrollBehavior, ScrollIntoViewOptions};
 use yew::prelude::*;
 
+use crate::api;
 use crate::components::input::ChatInput;
 use crate::components::message::{MessageBubble, ProcessSteps, TypingIndicator};
 use crate::components::suggestions::Suggestions;
 use crate::types::{
-    AgentMeta, BoardPostCompletion, BoardPostTarget, ChatMessage, ChatMessageUi, FavoriteQuestion,
-    FeedbackSubmission, MessageRole, ProcessStep,
+    AgentMeta, AgentStatCard as ApiAgentStatCard, BoardPostCompletion, BoardPostTarget, ChatMessage,
+    ChatMessageUi, FavoriteQuestion, FeedbackSubmission, MessageRole, ProcessStep,
 };
 
 #[derive(Properties, PartialEq)]
@@ -196,6 +198,31 @@ fn agent_stats_for(agent_id: Option<&str>) -> [StatCard; 3] {
     }
 }
 
+/// 비로그인 상태에서 통계 카드 값의 숫자를 가린다. "12건" → "?건", "5명" → "?명".
+/// 숫자가 없는 값("-" 등)은 그대로 둔다.
+fn masked_stat_value(value: &str, is_authenticated: bool) -> String {
+    if is_authenticated {
+        return value.to_string();
+    }
+    let suffix: String = value.chars().skip_while(|c| c.is_ascii_digit()).collect();
+    if suffix.len() == value.len() {
+        value.to_string()
+    } else {
+        format!("?{suffix}")
+    }
+}
+
+/// 더미 값 문자열("12건", "5명" 등)에서 숫자 뒤 단위 접미사만 뽑아낸다("건", "명").
+/// 숫자가 없는 값("-" 등)이면 빈 문자열을 반환한다(그 값 자체가 표시용이므로 접미사 불필요).
+fn stat_unit_suffix(value: &str) -> String {
+    let suffix: String = value.chars().skip_while(|c| c.is_ascii_digit()).collect();
+    if suffix.len() == value.len() {
+        String::new()
+    } else {
+        suffix
+    }
+}
+
 /// 예시질문 카드 왼쪽 아이콘 배지. 태그 의미와 무관하게 순서대로 4종을 순환시킨다.
 fn example_icon_for(index: usize) -> &'static str {
     const ICONS: [&str; 4] = ["clipboard", "document", "search", "people"];
@@ -207,6 +234,43 @@ pub fn chat_area(props: &ChatProps) -> Html {
     let messages_end_ref = use_node_ref();
     let input_focus_trigger = use_state(|| 0u32);
     let input_forced_disabled = use_state(|| false);
+    // 비로그인 상태로 통계 카드(목록보기/전체 업무 보기)를 눌렀을 때 뜨는 안내 토스트.
+    // 답변 완료 토스트(main.rs `.toast-stack`)와 같은 스타일을 재사용한다.
+    let login_toast_visible = use_state(|| false);
+    let show_login_toast = {
+        let login_toast_visible = login_toast_visible.clone();
+        Callback::from(move |_: ()| {
+            login_toast_visible.set(true);
+            let login_toast_visible = login_toast_visible.clone();
+            spawn_local(async move {
+                gloo_timers::future::TimeoutFuture::new(2_500).await;
+                login_toast_visible.set(false);
+            });
+        })
+    };
+
+    // 시작화면 통계 카드 실 데이터(`GET /api/records/stats`). 로그인 상태에서만 조회하고,
+    // 로딩 중/비로그인/조회 실패 시에는 `agent_stats_for()` 더미 값을 그대로 보여준다.
+    let real_stats: UseStateHandle<Option<Vec<ApiAgentStatCard>>> = use_state(|| None);
+    {
+        let real_stats = real_stats.clone();
+        let is_authenticated = props.is_authenticated;
+        let agent_id = props.agent_meta.as_ref().map(|m| m.id.clone());
+        use_effect_with((agent_id.clone(), is_authenticated), move |(agent_id, is_authenticated)| {
+            real_stats.set(None);
+            if *is_authenticated {
+                if let Some(agent_id) = agent_id.clone() {
+                    let real_stats = real_stats.clone();
+                    spawn_local(async move {
+                        if let Ok(resp) = api::fetch_agent_stats(&agent_id).await {
+                            real_stats.set(Some(resp.cards));
+                        }
+                    });
+                }
+            }
+            || ()
+        });
+    }
 
     {
         let messages_end_ref = messages_end_ref.clone();
@@ -261,6 +325,22 @@ pub fn chat_area(props: &ChatProps) -> Html {
         let examples = example_questions_for(agent_id);
         let short_code = agent_short_code(agent_id);
         let stats = agent_stats_for(agent_id);
+        // 실 데이터가 로드되면(로그인 + 카드 개수 일치) 값만 교체하고 아이콘/라벨/서브라벨/링크
+        // 문구는 더미 정의를 그대로 쓴다("법령 개정" 등 is_static 카드는 더미 값 유지).
+        let resolved_values: Vec<String> = match real_stats.as_ref() {
+            Some(cards) if cards.len() == stats.len() => cards
+                .iter()
+                .zip(stats.iter())
+                .map(|(card, (_, _, dummy_value, _, _))| {
+                    if card.is_static {
+                        dummy_value.to_string()
+                    } else {
+                        format!("{}{}", card.value, stat_unit_suffix(dummy_value))
+                    }
+                })
+                .collect(),
+            _ => stats.iter().map(|(_, _, value, _, _)| value.to_string()).collect(),
+        };
         let agent_name = props
             .agent_meta
             .as_ref()
@@ -276,16 +356,34 @@ pub fn chat_area(props: &ChatProps) -> Html {
                             <h2>{ format!("{}와", agent_name) }<br />{ "대화를 시작해보세요" }</h2>
                             <p>{ "아래 예시 질문을 클릭하거나 직접 입력하세요" }</p>
                         </div>
-                        { for stats.iter().enumerate().map(|(i, (icon, label, value, sub, link_label))| {
+                        { for stats.iter().enumerate().map(|(i, (icon, label, _dummy_value, sub, link_label))| {
+                            let value = resolved_values[i].as_str();
                             let is_highlight = i == stats.len() - 1;
                             let card_class = classes!("welcome-stat-card", is_highlight.then_some("highlight"));
+                            // 목록보기/전체 업무 보기 클릭: 로그인 상태면 해당 에이전트의 요약 목록
+                            // (RecordsView, `#/records/{agent_id}`)으로 이동, 비로그인이면 이동하지
+                            // 않고 로그인 안내만 띄운다.
+                            let is_authenticated = props.is_authenticated;
+                            let show_login_toast = show_login_toast.clone();
+                            let target_agent_id = agent_id.unwrap_or_default().to_string();
+                            let on_stat_click = Callback::from(move |_: MouseEvent| {
+                                if is_authenticated {
+                                    if let Some(w) = web_sys::window() {
+                                        let loc = w.location();
+                                        let _ = loc.set_hash(&format!("#/records/{target_agent_id}"));
+                                        let _ = loc.reload();
+                                    }
+                                } else {
+                                    show_login_toast.emit(());
+                                }
+                            });
                             html! {
-                                <div class={card_class}>
+                                <div class={card_class} onclick={on_stat_click}>
                                     <div class="welcome-stat-head">
                                         <span class="welcome-stat-icon">{ welcome_icon(icon) }</span>
                                         <span class="welcome-stat-label">{ *label }</span>
                                     </div>
-                                    <div class="welcome-stat-value">{ *value }</div>
+                                    <div class="welcome-stat-value">{ masked_stat_value(value, props.is_authenticated) }</div>
                                     <div class="welcome-stat-sub">{ *sub }</div>
                                     <div class="welcome-stat-link">
                                         <span>{ *link_label }</span>
@@ -359,6 +457,23 @@ pub fn chat_area(props: &ChatProps) -> Html {
                         { "AI가 안전보건 관련 정보를 기반으로 답변합니다. 중요한 의사결정은 담당자 확인이 필요합니다." }
                     </div>
                 </div>
+                { if *login_toast_visible {
+                    html! {
+                        <div class="toast-stack">
+                            <div class="toast">
+                                <div class="toast-body">
+                                    <span class="toast-icon">{ "🔒" }</span>
+                                    <div class="toast-text">
+                                        <div class="toast-title">{ "로그인이 필요해요" }</div>
+                                        <div class="toast-sub">{ "로그인 후 이용해주세요" }</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    }
+                } else {
+                    html! {}
+                }}
             </div>
         }
     } else {

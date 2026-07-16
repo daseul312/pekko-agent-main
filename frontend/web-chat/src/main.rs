@@ -2928,6 +2928,19 @@ fn current_resolution_route() -> Option<(String, bool)> {
     Some((key, admin))
 }
 
+/// 현재 URL 해시가 `#/records/{agent_id}`면 그 agent_id를 돌려준다(에이전트별 요약 목록 분기용).
+fn current_records_route() -> Option<String> {
+    let window = web_sys::window()?;
+    let hash = window.location().hash().ok()?;
+    let rest = hash.strip_prefix("#/records/")?;
+    let id = rest.trim_end_matches('/');
+    if id.is_empty() || id.contains('/') {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
 fn main() {
     wasm_logger::init(wasm_logger::Config::default());
     // 해시 경로별 전용 페이지 분기(라우터 미사용, 순차 체크).
@@ -2946,6 +2959,10 @@ fn main() {
     } else if is_admin_feedback_route() {
         // `/admin/feedback` — 피드백 통계(관리자) 페이지.
         yew::Renderer::<components::admin_feedback::AdminFeedback>::new().render();
+    } else if let Some(agent_id) = current_records_route() {
+        // `/records/{agent_id}` — 에이전트별 요약 목록(현황판) 페이지.
+        let props = components::records_view::RecordsViewProps { agent_id };
+        yew::Renderer::<components::records_view::RecordsView>::with_props(props).render();
     } else {
         yew::Renderer::<App>::new().render();
     }

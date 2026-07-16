@@ -503,6 +503,38 @@ struct FormalWorkTypesResponse {
     work_types: Vec<FormalWorkType>,
 }
 
+/// GET /api/records/workplans 쿼리 파라미터.
+#[derive(Deserialize)]
+struct WorkPlansQuery {
+    /// "applyStatus" 필터(예: "승인"). 없으면 전체.
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    page: Option<i64>,
+    #[serde(default, rename = "pageSize")]
+    page_size: Option<i64>,
+}
+
+/// public."PreWorkPlan" 요약 행(현황판 목록용).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkPlanRow {
+    pwp_no: String,
+    title: String,
+    work_type_name: String,
+    apply_status: String,
+    apply_employee_name: String,
+    create_date: String,
+}
+
+#[derive(Serialize)]
+struct WorkPlansResponse {
+    items: Vec<WorkPlanRow>,
+    total: i64,
+    page: i64,
+    page_size: i64,
+}
+
 /// POST /api/share 요청. 프론트가 보유한 답변 본문을 스냅샷으로 보낸다
 /// (CoreDB 메시지에는 안정적 id가 없어 message_id로 재조회가 불가능하므로).
 #[derive(Deserialize)]
@@ -628,6 +660,36 @@ struct CommentRow {
     created_at: String,
     /// 이미 조치 완료(알림 발송)된 건이면 true.
     resolved: bool,
+}
+
+/// GET /api/records/feedback 쿼리 파라미터.
+#[derive(Deserialize)]
+struct MyFeedbackQuery {
+    /// 필터할 에이전트 id(없으면 전체).
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
+}
+
+/// GET /api/records/feedback 응답 행 1건. 관리자 집계(`CommentRow`)와 달리 조회자 본인이
+/// 남긴 평가만 담는다(admin 권한 불필요, 일반 로그인 사용자 전용).
+#[derive(Serialize)]
+struct MyFeedbackRow {
+    agent_id: String,
+    rating: String,
+    comment: Option<String>,
+    tags: Vec<String>,
+    created_at: String,
+}
+
+/// GET /api/records/feedback 응답(페이지네이션).
+#[derive(Serialize)]
+struct MyFeedbackResponse {
+    items: Vec<MyFeedbackRow>,
+    total: i64,
 }
 
 /// 부정 사유 고정 5종(수집 칩과 동일 순서). 통계 도넛/칩의 안정적 순서 보장.
@@ -3024,6 +3086,51 @@ async fn get_feedback_comments(
     Ok(Json(FeedbackCommentsResponse { items, total }))
 }
 
+/// GET /api/records/feedback?agentId=&limit=&offset= - 로그인한 사용자 본인의 피드백 목록.
+/// `RecordsView`가 permit 이외 에이전트에서 호출한다(관리자 집계 엔드포인트와 달리
+/// admin 허용목록 검사 없음 — 조회자 본인 + 같은 회사 기록만 반환하므로 아무 로그인
+/// 사용자나 호출 가능하다). `get_feedback_stats`/`get_feedback_comments`와는 별개다.
+async fn get_my_feedback(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Query(q): Query<MyFeedbackQuery>,
+) -> Result<Json<MyFeedbackResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(unauthorized_err)?;
+    let limit = q.limit.unwrap_or(20).clamp(1, 100) as usize;
+    let offset = q.offset.unwrap_or(0).max(0) as usize;
+    let agent_filter = q.agent_id.filter(|a| !a.is_empty());
+
+    let records = state.feedback_store.list_all().await.map_err(|e| {
+        error!(error = %e, "피드백 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("피드백 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let mut rows: Vec<MyFeedbackRow> = records
+        .into_iter()
+        .filter(|r| r.employee_id == identity.employee_id)
+        .filter(|r| r.company_code == identity.company_code)
+        .filter(|r| agent_filter.as_deref().map(|a| a == r.agent_id).unwrap_or(true))
+        .map(|r| MyFeedbackRow {
+            agent_id: r.agent_id,
+            rating: r.rating,
+            comment: normalize_comment(&r.comment),
+            tags: r.tags,
+            created_at: r.created_at,
+        })
+        .collect();
+    rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    let total = rows.len() as i64;
+    let items = rows.into_iter().skip(offset).take(limit).collect();
+    Ok(Json(MyFeedbackResponse { items, total }))
+}
+
 // ============================================================================
 // 조치 완료(개선 답변) + 인앱 알림
 // ============================================================================
@@ -3366,6 +3473,893 @@ async fn get_formal_work_types(
         .map(|(code, name)| FormalWorkType { code, name })
         .collect();
     Ok(Json(FormalWorkTypesResponse { work_types }))
+}
+
+/// GET /api/records/workplans?status=&page=&pageSize= - 작업계획서 요약 목록(현황판).
+/// `ehs-permit-agent` 전용 화면(RecordsView)이 호출한다. 회사 스코프로 제한하고
+/// `applyStatus` 선택 필터 + 페이지네이션을 지원한다. is_deleted='N' 행만 대상.
+async fn get_workplans(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Query(q): Query<WorkPlansQuery>,
+) -> Result<Json<WorkPlansResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(unauthorized_err)?;
+    let page = q.page.unwrap_or(1).max(1);
+    let page_size = q.page_size.unwrap_or(20).clamp(1, 100);
+    let offset = (page - 1) * page_size;
+    let status = q.status.as_deref().filter(|s| !s.is_empty());
+
+    let total: i64 = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM public."PreWorkPlan"
+           WHERE "companyCode" = $1 AND is_deleted = 'N'
+             AND ($2::text IS NULL OR "applyStatus" = $2)"#,
+    )
+    .bind(&identity.company_code)
+    .bind(status)
+    .fetch_one(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| {
+        error!(error = %e, "작업계획서 건수 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("작업계획서 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+        r#"SELECT "pwpNo"::text,
+                  COALESCE(title, ''),
+                  COALESCE("workTypeName", ''),
+                  COALESCE("applyStatus", ''),
+                  COALESCE("applyEmployeeName", ''),
+                  COALESCE(to_char("createDate", 'YYYY-MM-DD'), '')
+           FROM public."PreWorkPlan"
+           WHERE "companyCode" = $1 AND is_deleted = 'N'
+             AND ($2::text IS NULL OR "applyStatus" = $2)
+           ORDER BY "createDate" DESC
+           LIMIT $3 OFFSET $4"#,
+    )
+    .bind(&identity.company_code)
+    .bind(status)
+    .bind(page_size)
+    .bind(offset)
+    .fetch_all(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| {
+        error!(error = %e, "작업계획서 목록 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("작업계획서 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let items = rows
+        .into_iter()
+        .map(
+            |(pwp_no, title, work_type_name, apply_status, apply_employee_name, create_date)| WorkPlanRow {
+                pwp_no,
+                title,
+                work_type_name,
+                apply_status,
+                apply_employee_name,
+                create_date,
+            },
+        )
+        .collect();
+
+    Ok(Json(WorkPlansResponse { items, total, page, page_size }))
+}
+
+/// GET /api/records/inspections 쿼리 파라미터.
+#[derive(Deserialize)]
+struct InspectionsQuery {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    page: Option<i64>,
+    #[serde(default, rename = "pageSize")]
+    page_size: Option<i64>,
+}
+
+/// public."SafetyRulesInspect" 요약 행(현황판 목록용).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InspectionRow {
+    srino: String,
+    employee_name: String,
+    department_name: String,
+    status: String,
+    repeat_cycle_date: String,
+    inspection_date: String,
+}
+
+#[derive(Serialize)]
+struct InspectionsResponse {
+    items: Vec<InspectionRow>,
+    total: i64,
+    page: i64,
+    page_size: i64,
+}
+
+/// GET /api/records/inspections?status=&page=&pageSize= - 순회점검 요약 목록(현황판).
+/// `ehs-inspection-agent` 전용 화면(RecordsView)이 호출한다.
+async fn get_inspections(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Query(q): Query<InspectionsQuery>,
+) -> Result<Json<InspectionsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(unauthorized_err)?;
+    let page = q.page.unwrap_or(1).max(1);
+    let page_size = q.page_size.unwrap_or(20).clamp(1, 100);
+    let offset = (page - 1) * page_size;
+    let status = q.status.as_deref().filter(|s| !s.is_empty());
+
+    let total: i64 = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM public."SafetyRulesInspect"
+           WHERE companycode = $1 AND is_deleted = 'N'
+             AND ($2::text IS NULL OR inspectionstatusname = $2)"#,
+    )
+    .bind(&identity.company_code)
+    .bind(status)
+    .fetch_one(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| {
+        error!(error = %e, "순회점검 건수 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("순회점검 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+        r#"SELECT srino::text,
+                  COALESCE(employeename, ''),
+                  COALESCE(departmentname, ''),
+                  COALESCE(inspectionstatusname, ''),
+                  COALESCE(to_char(repeatcycledate, 'YYYY-MM-DD'), ''),
+                  COALESCE(to_char(inspectiondate, 'YYYY-MM-DD'), '')
+           FROM public."SafetyRulesInspect"
+           WHERE companycode = $1 AND is_deleted = 'N'
+             AND ($2::text IS NULL OR inspectionstatusname = $2)
+           ORDER BY repeatcycledate DESC
+           LIMIT $3 OFFSET $4"#,
+    )
+    .bind(&identity.company_code)
+    .bind(status)
+    .bind(page_size)
+    .bind(offset)
+    .fetch_all(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| {
+        error!(error = %e, "순회점검 목록 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("순회점검 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let items = rows
+        .into_iter()
+        .map(
+            |(srino, employee_name, department_name, status, repeat_cycle_date, inspection_date)| InspectionRow {
+                srino,
+                employee_name,
+                department_name,
+                status,
+                repeat_cycle_date,
+                inspection_date,
+            },
+        )
+        .collect();
+
+    Ok(Json(InspectionsResponse { items, total, page, page_size }))
+}
+
+/// GET /api/records/education 쿼리 파라미터.
+#[derive(Deserialize)]
+struct EducationQuery {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    page: Option<i64>,
+    #[serde(default, rename = "pageSize")]
+    page_size: Option<i64>,
+}
+
+/// public."EducationPlanTarget" 요약 행(현황판 목록용).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EducationRow {
+    eptno: String,
+    employee_name: String,
+    department_name: String,
+    education_completion_date: String,
+    test_pass_yn: String,
+}
+
+#[derive(Serialize)]
+struct EducationResponse {
+    items: Vec<EducationRow>,
+    total: i64,
+    page: i64,
+    page_size: i64,
+}
+
+/// GET /api/records/education?status=&page=&pageSize= - 교육이수 요약 목록(현황판).
+/// `ehs-education-agent` 전용 화면(RecordsView)이 호출한다.
+/// status: "incomplete"(미이수, educationcompletiondate IS NULL) / "complete"(이수) / 없음(전체).
+async fn get_education(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Query(q): Query<EducationQuery>,
+) -> Result<Json<EducationResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(unauthorized_err)?;
+    let page = q.page.unwrap_or(1).max(1);
+    let page_size = q.page_size.unwrap_or(20).clamp(1, 100);
+    let offset = (page - 1) * page_size;
+    let status = q.status.as_deref().filter(|s| !s.is_empty());
+
+    let total: i64 = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM public."EducationPlanTarget"
+           WHERE companycode = $1
+             AND (
+               $2::text IS NULL
+               OR ($2 = 'incomplete' AND educationcompletiondate IS NULL)
+               OR ($2 = 'complete' AND educationcompletiondate IS NOT NULL)
+             )"#,
+    )
+    .bind(&identity.company_code)
+    .bind(status)
+    .fetch_one(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| {
+        error!(error = %e, "교육이수 건수 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("교육이수 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let rows = sqlx::query_as::<_, (String, String, String, String, String)>(
+        r#"SELECT eptno::text,
+                  COALESCE(employeename, ''),
+                  COALESCE(departmentname, ''),
+                  COALESCE(to_char(educationcompletiondate, 'YYYY-MM-DD'), ''),
+                  COALESCE(testpassyn, '')
+           FROM public."EducationPlanTarget"
+           WHERE companycode = $1
+             AND (
+               $2::text IS NULL
+               OR ($2 = 'incomplete' AND educationcompletiondate IS NULL)
+               OR ($2 = 'complete' AND educationcompletiondate IS NOT NULL)
+             )
+           ORDER BY educationcompletiondate NULLS FIRST, eptno DESC
+           LIMIT $3 OFFSET $4"#,
+    )
+    .bind(&identity.company_code)
+    .bind(status)
+    .bind(page_size)
+    .bind(offset)
+    .fetch_all(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| {
+        error!(error = %e, "교육이수 목록 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("교육이수 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let items = rows
+        .into_iter()
+        .map(
+            |(eptno, employee_name, department_name, education_completion_date, test_pass_yn)| EducationRow {
+                eptno,
+                employee_name,
+                department_name,
+                education_completion_date,
+                test_pass_yn,
+            },
+        )
+        .collect();
+
+    Ok(Json(EducationResponse { items, total, page, page_size }))
+}
+
+/// GET /api/records/environment 쿼리 파라미터.
+#[derive(Deserialize)]
+struct EnvironmentQuery {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    page: Option<i64>,
+    #[serde(default, rename = "pageSize")]
+    page_size: Option<i64>,
+}
+
+/// public."WorkEnvironmentManagement" 요약 행(현황판 목록용).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvironmentRow {
+    no: String,
+    title: String,
+    factory_name: String,
+    measure_date: String,
+    measure_type: String,
+    exceed_count: i64,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct EnvironmentResponse {
+    items: Vec<EnvironmentRow>,
+    total: i64,
+    page: i64,
+    page_size: i64,
+}
+
+/// GET /api/records/environment?status=&page=&pageSize= - 작업환경측정 요약 목록(현황판).
+/// `ehs-health-environment-agent` 전용 화면(RecordsView)이 호출한다.
+/// status: "exceed"("exceedCount" > 0) / 없음(전체).
+async fn get_environment(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Query(q): Query<EnvironmentQuery>,
+) -> Result<Json<EnvironmentResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(unauthorized_err)?;
+    let page = q.page.unwrap_or(1).max(1);
+    let page_size = q.page_size.unwrap_or(20).clamp(1, 100);
+    let offset = (page - 1) * page_size;
+    let status = q.status.as_deref().filter(|s| !s.is_empty());
+
+    let total: i64 = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM public."WorkEnvironmentManagement"
+           WHERE "companyCode" = $1 AND is_deleted = 'N'
+             AND ($2::text IS NULL OR ($2 = 'exceed' AND "exceedCount" > 0))"#,
+    )
+    .bind(&identity.company_code)
+    .bind(status)
+    .fetch_one(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| {
+        error!(error = %e, "작업환경측정 건수 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("작업환경측정 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, i64, String)>(
+        r#"SELECT no::text,
+                  COALESCE(title, ''),
+                  COALESCE("factoryName", ''),
+                  COALESCE(to_char("measureDate", 'YYYY-MM-DD'), ''),
+                  COALESCE("measureType", ''),
+                  COALESCE("exceedCount", 0)::int8,
+                  COALESCE(status, '')
+           FROM public."WorkEnvironmentManagement"
+           WHERE "companyCode" = $1 AND is_deleted = 'N'
+             AND ($2::text IS NULL OR ($2 = 'exceed' AND "exceedCount" > 0))
+           ORDER BY "measureDate" DESC
+           LIMIT $3 OFFSET $4"#,
+    )
+    .bind(&identity.company_code)
+    .bind(status)
+    .bind(page_size)
+    .bind(offset)
+    .fetch_all(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| {
+        error!(error = %e, "작업환경측정 목록 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("작업환경측정 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let items = rows
+        .into_iter()
+        .map(
+            |(no, title, factory_name, measure_date, measure_type, exceed_count, status)| EnvironmentRow {
+                no,
+                title,
+                factory_name,
+                measure_date,
+                measure_type,
+                exceed_count,
+                status,
+            },
+        )
+        .collect();
+
+    Ok(Json(EnvironmentResponse { items, total, page, page_size }))
+}
+
+/// GET /api/records/nearmiss 쿼리 파라미터.
+#[derive(Deserialize)]
+struct NearMissQuery {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    page: Option<i64>,
+    #[serde(default, rename = "pageSize")]
+    page_size: Option<i64>,
+}
+
+/// public."NearMissManagement" 요약 행(현황판 목록용).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NearMissRow {
+    nmmno: String,
+    field_name: String,
+    declare_employee_name: String,
+    occurrence_date: String,
+    action_status_name: String,
+    action_content: String,
+}
+
+#[derive(Serialize)]
+struct NearMissResponse {
+    items: Vec<NearMissRow>,
+    total: i64,
+    page: i64,
+    page_size: i64,
+}
+
+/// GET /api/records/nearmiss?status=&page=&pageSize= - 아차사고 요약 목록(현황판).
+/// `ehs-accident-agent` 전용 화면(RecordsView)이 호출한다.
+/// status: "delayed"(조치 지연) / 없음(전체). occurrencedate는 text 컬럼이라 캐스팅하지 않는다.
+async fn get_nearmiss(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Query(q): Query<NearMissQuery>,
+) -> Result<Json<NearMissResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(unauthorized_err)?;
+    let page = q.page.unwrap_or(1).max(1);
+    let page_size = q.page_size.unwrap_or(20).clamp(1, 100);
+    let offset = (page - 1) * page_size;
+    let status = q.status.as_deref().filter(|s| !s.is_empty());
+
+    let total: i64 = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM public."NearMissManagement"
+           WHERE declarecompanycode = $1
+             AND ($2::text IS NULL OR ($2 = 'delayed' AND actionstatusname NOT LIKE '%완료%' AND actionstatusname <> '예외처리'))"#,
+    )
+    .bind(&identity.company_code)
+    .bind(status)
+    .fetch_one(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| {
+        error!(error = %e, "아차사고 건수 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("아차사고 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+        r#"SELECT nmmno::text,
+                  COALESCE(fieldname, ''),
+                  COALESCE(declareemployeename, ''),
+                  COALESCE(occurrencedate, ''),
+                  COALESCE(actionstatusname, ''),
+                  COALESCE(actioncontent, '')
+           FROM public."NearMissManagement"
+           WHERE declarecompanycode = $1
+             AND ($2::text IS NULL OR ($2 = 'delayed' AND actionstatusname NOT LIKE '%완료%' AND actionstatusname <> '예외처리'))
+           ORDER BY nmmno DESC
+           LIMIT $3 OFFSET $4"#,
+    )
+    .bind(&identity.company_code)
+    .bind(status)
+    .bind(page_size)
+    .bind(offset)
+    .fetch_all(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| {
+        error!(error = %e, "아차사고 목록 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("아차사고 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let items = rows
+        .into_iter()
+        .map(
+            |(nmmno, field_name, declare_employee_name, occurrence_date, action_status_name, action_content)| NearMissRow {
+                nmmno,
+                field_name,
+                declare_employee_name,
+                occurrence_date,
+                action_status_name,
+                action_content,
+            },
+        )
+        .collect();
+
+    Ok(Json(NearMissResponse { items, total, page, page_size }))
+}
+
+/// GET /api/records/committee 쿼리 파라미터.
+#[derive(Deserialize)]
+struct CommitteeQuery {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    page: Option<i64>,
+    #[serde(default, rename = "pageSize")]
+    page_size: Option<i64>,
+}
+
+/// public."SafetyHealthCommittee" 요약 행(현황판 목록용).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitteeRow {
+    shc_no: String,
+    title: String,
+    location: String,
+    start_date: String,
+    sign_status: String,
+    meeting_type: String,
+}
+
+#[derive(Serialize)]
+struct CommitteeResponse {
+    items: Vec<CommitteeRow>,
+    total: i64,
+    page: i64,
+    page_size: i64,
+}
+
+/// GET /api/records/committee?status=&page=&pageSize= - 산업안전보건위원회 요약 목록(현황판).
+/// `ehs-compliance-agent` 전용 화면(RecordsView)이 호출한다.
+/// "companyCode"는 integer 컬럼이라 텍스트로 캐스팅해 비교한다(get_agent_stats와 동일 방식).
+/// status: "pending"(서명 미완료) / 없음(전체).
+async fn get_committee(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Query(q): Query<CommitteeQuery>,
+) -> Result<Json<CommitteeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(unauthorized_err)?;
+    let page = q.page.unwrap_or(1).max(1);
+    let page_size = q.page_size.unwrap_or(20).clamp(1, 100);
+    let offset = (page - 1) * page_size;
+    let status = q.status.as_deref().filter(|s| !s.is_empty());
+
+    let total: i64 = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM public."SafetyHealthCommittee"
+           WHERE "companyCode"::text = $1 AND is_deleted = 'N'
+             AND ($2::text IS NULL OR ($2 = 'pending' AND "signStatus" IN ('VOTING', 'PENDING')))"#,
+    )
+    .bind(&identity.company_code)
+    .bind(status)
+    .fetch_one(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| {
+        error!(error = %e, "위원회 건수 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("위원회 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+        r#"SELECT "shcNo"::text,
+                  COALESCE(title, ''),
+                  COALESCE(location, ''),
+                  COALESCE(to_char("startDate", 'YYYY-MM-DD'), ''),
+                  COALESCE("signStatus", ''),
+                  COALESCE("meetingType", '')
+           FROM public."SafetyHealthCommittee"
+           WHERE "companyCode"::text = $1 AND is_deleted = 'N'
+             AND ($2::text IS NULL OR ($2 = 'pending' AND "signStatus" IN ('VOTING', 'PENDING')))
+           ORDER BY "startDate" DESC
+           LIMIT $3 OFFSET $4"#,
+    )
+    .bind(&identity.company_code)
+    .bind(status)
+    .bind(page_size)
+    .bind(offset)
+    .fetch_all(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| {
+        error!(error = %e, "위원회 목록 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("위원회 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    })?;
+
+    let items = rows
+        .into_iter()
+        .map(
+            |(shc_no, title, location, start_date, sign_status, meeting_type)| CommitteeRow {
+                shc_no,
+                title,
+                location,
+                start_date,
+                sign_status,
+                meeting_type,
+            },
+        )
+        .collect();
+
+    Ok(Json(CommitteeResponse { items, total, page, page_size }))
+}
+
+/// GET /api/records/stats 쿼리 파라미터.
+#[derive(Deserialize)]
+struct AgentStatsQuery {
+    #[serde(default, rename = "agentId")]
+    agent_id: Option<String>,
+}
+
+/// 시작화면 상단 통계 카드 1건(값이 없는 정적 카드 — 예: 법령 개정 — 는 `is_static=true`).
+#[derive(Serialize)]
+struct AgentStatCard {
+    label: String,
+    value: i64,
+    sub: String,
+    is_static: bool,
+}
+
+#[derive(Serialize)]
+struct AgentStatsResponse {
+    cards: Vec<AgentStatCard>,
+}
+
+/// GET /api/records/stats?agentId= - 에이전트별 시작화면 통계 카드 실 데이터(3장: 세부 2장 +
+/// "오늘 처리 필요" 합계 강조 카드). `get_workplans`/`get_my_feedback`와 동일하게 admin 검사
+/// 없이 로그인 사용자면 누구나 호출 가능(회사 스코프로 제한). 미지원 agent_id는 0건 카드를
+/// 반환한다(에러로 처리하지 않음 — 프런트 더미 폴백과 동일 취지).
+async fn get_agent_stats(
+    State(state): State<AppState>,
+    OptionalAuth(auth): OptionalAuth,
+    Query(q): Query<AgentStatsQuery>,
+) -> Result<Json<AgentStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let identity = auth.ok_or_else(unauthorized_err)?;
+    let pool = state.pg_pool.as_ref();
+    let db_err = |e: sqlx::Error| {
+        error!(error = %e, "통계 카드 조회 실패");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("통계 카드 조회 실패: {e}"),
+                code: "DB_ERROR".into(),
+            }),
+        )
+    };
+
+    let cards = match q.agent_id.as_deref() {
+        Some("ehs-permit-agent") => {
+            let pending_permit: i64 = sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM public."PreWorkPlan"
+                   WHERE "companyCode" = $1 AND is_deleted = 'N' AND "applyStatus" IN ('신청', '검토')"#,
+            )
+            .bind(&identity.company_code)
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
+
+            let tbm_unsigned: i64 = sqlx::query_scalar(
+                r#"SELECT COUNT(DISTINCT employeeid) FROM public."TBMManagement"
+                   WHERE companycode = $1 AND signyn = 'N' AND scheduleddate::date = CURRENT_DATE"#,
+            )
+            .bind(&identity.company_code)
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
+
+            vec![
+                AgentStatCard { label: "확인 대기".into(), value: pending_permit, sub: "안전작업 허가".into(), is_static: false },
+                AgentStatCard { label: "서명 미완료".into(), value: tbm_unsigned, sub: "오늘 TBM".into(), is_static: false },
+                AgentStatCard {
+                    label: "오늘 처리 필요".into(),
+                    value: pending_permit + tbm_unsigned,
+                    sub: "허가·TBM 포함".into(),
+                    is_static: false,
+                },
+            ]
+        }
+        Some("ehs-inspection-agent") => {
+            let uninspected: i64 = sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM public."SafetyRulesInspect"
+                   WHERE companycode = $1 AND is_deleted = 'N' AND inspectionstatusname = '점검예정'
+                     AND repeatcycledate >= date_trunc('week', CURRENT_DATE)
+                     AND repeatcycledate < date_trunc('week', CURRENT_DATE) + interval '7 days'"#,
+            )
+            .bind(&identity.company_code)
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
+
+            // "responseDate"는 character varying 컬럼이라 날짜 캐스팅이 불안정할 수 있어(빈
+            // 문자열/비표준 포맷 가능) 날짜 필터는 생략하고 상태값만으로 "아직 열려있는" 개선조치를
+            // "지연 조치"로 집계한다.
+            let delayed_action: i64 = sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM public."CorrectiveOrder"
+                   WHERE "companyCode" = $1 AND status NOT IN ('처리완료', '종결')"#,
+            )
+            .bind(&identity.company_code)
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
+
+            vec![
+                AgentStatCard { label: "미점검".into(), value: uninspected, sub: "이번 주 순회점검".into(), is_static: false },
+                AgentStatCard { label: "지연 조치".into(), value: delayed_action, sub: "개선조치".into(), is_static: false },
+                AgentStatCard {
+                    label: "오늘 처리 필요".into(),
+                    value: uninspected + delayed_action,
+                    sub: "점검·조치 포함".into(),
+                    is_static: false,
+                },
+            ]
+        }
+        Some("ehs-compliance-agent") => {
+            // "companyCode"는 integer 컬럼이라 텍스트로 캐스팅해 비교한다.
+            let pending_agenda: i64 = sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM public."SafetyHealthCommittee"
+                   WHERE "companyCode"::text = $1 AND is_deleted = 'N' AND "signStatus" IN ('VOTING', 'PENDING')"#,
+            )
+            .bind(&identity.company_code)
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
+
+            vec![
+                // 법령 개정은 국가법령정보센터 외부 API 연동 영역이라 DB 집계 대상이 아니다 —
+                // 프런트가 항상 정적 더미("-")로 표시하도록 static 카드로 표시만 하고 값은 0(미사용).
+                AgentStatCard { label: "개정 법령".into(), value: 0, sub: "이번 달".into(), is_static: true },
+                AgentStatCard { label: "미이행 안건".into(), value: pending_agenda, sub: "위원회 회의".into(), is_static: false },
+                AgentStatCard {
+                    label: "오늘 처리 필요".into(),
+                    value: pending_agenda,
+                    sub: "법령·안건 포함".into(),
+                    is_static: false,
+                },
+            ]
+        }
+        Some("ehs-education-agent") => {
+            let incomplete: i64 = sqlx::query_scalar(
+                r#"SELECT COUNT(DISTINCT employeeid) FROM public."EducationPlanTarget"
+                   WHERE companycode = $1 AND educationcompletiondate IS NULL"#,
+            )
+            .bind(&identity.company_code)
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
+
+            let survey_pending: i64 = sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM public."SurveyQuestionnaireManagement"
+                   WHERE companycode = $1 AND is_deleted = 'N' AND surveysignyn <> 'Y' AND surveyenddate >= now()"#,
+            )
+            .bind(&identity.company_code)
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
+
+            vec![
+                AgentStatCard { label: "미이수".into(), value: incomplete, sub: "이번 달 교육".into(), is_static: false },
+                AgentStatCard { label: "응답 대기".into(), value: survey_pending, sub: "진행 중 설문".into(), is_static: false },
+                AgentStatCard {
+                    label: "오늘 처리 필요".into(),
+                    value: incomplete + survey_pending,
+                    sub: "교육·설문 포함".into(),
+                    is_static: false,
+                },
+            ]
+        }
+        Some("ehs-health-environment-agent") => {
+            let exceed: i64 = sqlx::query_scalar(
+                r#"SELECT COALESCE(SUM("exceedCount"), 0) FROM public."WorkEnvironmentManagement"
+                   WHERE "companyCode" = $1 AND is_deleted = 'N' AND "measureDate" >= date_trunc('month', CURRENT_DATE)"#,
+            )
+            .bind(&identity.company_code)
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
+
+            let unchecked: i64 = sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM public."EmployeeInfo" e
+                   WHERE e."companyCode" = $1 AND e.useyn = 'Y'
+                     AND NOT EXISTS (
+                       SELECT 1 FROM public."RegularHealthCheckup" r
+                       WHERE r."employeeId" = e."employeeId"
+                         AND r."checkupYear" = EXTRACT(YEAR FROM CURRENT_DATE)::int
+                         AND r.is_deleted = 'N'
+                     )"#,
+            )
+            .bind(&identity.company_code)
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
+
+            vec![
+                AgentStatCard { label: "노출기준 초과".into(), value: exceed, sub: "작업환경측정".into(), is_static: false },
+                AgentStatCard { label: "미수검".into(), value: unchecked, sub: "정기건강검진".into(), is_static: false },
+                AgentStatCard {
+                    label: "오늘 처리 필요".into(),
+                    value: exceed + unchecked,
+                    sub: "측정·검진 포함".into(),
+                    is_static: false,
+                },
+            ]
+        }
+        Some("ehs-accident-agent") => {
+            let delayed: i64 = sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM public."NearMissManagement"
+                   WHERE declarecompanycode = $1 AND actionstatusname NOT LIKE '%완료%' AND actionstatusname <> '예외처리'"#,
+            )
+            .bind(&identity.company_code)
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
+
+            let unapproved: i64 = sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM public."CorrectiveOrder" WHERE "companyCode" = $1 AND status = '접수'"#,
+            )
+            .bind(&identity.company_code)
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
+
+            vec![
+                AgentStatCard { label: "처리 지연".into(), value: delayed, sub: "아차사고 조치".into(), is_static: false },
+                AgentStatCard { label: "미결재".into(), value: unapproved, sub: "대외문서".into(), is_static: false },
+                AgentStatCard {
+                    label: "오늘 처리 필요".into(),
+                    value: delayed + unapproved,
+                    sub: "사고·문서 포함".into(),
+                    is_static: false,
+                },
+            ]
+        }
+        _ => vec![
+            AgentStatCard { label: "확인 대기".into(), value: 0, sub: "-".into(), is_static: true },
+            AgentStatCard { label: "미완료".into(), value: 0, sub: "-".into(), is_static: true },
+            AgentStatCard { label: "오늘 처리 필요".into(), value: 0, sub: "-".into(), is_static: true },
+        ],
+    };
+
+    Ok(Json(AgentStatsResponse { cards }))
 }
 
 /// POST /api/notifications/:id/read - 알림 읽음 처리(소유자).
@@ -3861,6 +4855,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/admin/feedback/resolve/send", post(send_resolution))
         .route("/api/notifications", get(get_notifications))
         .route("/api/permit/formal-work-types", get(get_formal_work_types))
+        .route("/api/records/workplans", get(get_workplans))
+        .route("/api/records/inspections", get(get_inspections))
+        .route("/api/records/education", get(get_education))
+        .route("/api/records/environment", get(get_environment))
+        .route("/api/records/nearmiss", get(get_nearmiss))
+        .route("/api/records/committee", get(get_committee))
+        .route("/api/records/feedback", get(get_my_feedback))
+        .route("/api/records/stats", get(get_agent_stats))
         .route("/api/notifications/:id/read", post(mark_notification_read))
         .route("/api/resolution/:feedback_key", get(get_resolution))
         .route("/api/resolution/:feedback_key/reverify", post(submit_reverify))

@@ -10,6 +10,37 @@ const API_BASE_URL: Option<&str> = option_env!("WEB_CHAT_API_BASE_URL");
 const API_PORT: &str = "8082";
 const LOCAL_API_BASE_URL: &str = "http://127.0.0.1:8082";
 
+/// Next.js 관리자 대시보드(별도 프로젝트, 코드 수정 불가) 베이스 URL. 빌드 시 환경변수로 주입.
+/// RecordsView의 "Next 관리자 페이지에서 자세히 보기" 링크에만 사용(로그인 페이지로만 이동,
+/// 비밀번호는 절대 전달하지 않는다).
+const ADMIN_DASHBOARD_URL: Option<&str> = option_env!("WEB_CHAT_ADMIN_DASHBOARD_URL");
+
+/// Next 관리자 로그인 페이지 경로. 실제 서비스 경로(`/pages/signin`, NextAuth
+/// SessionRequired 리다이렉트 형식)에 맞춘 값이며, 메인 화면 경로를 `callbackUrl`로 넘긴다.
+const ADMIN_DASHBOARD_LOGIN_PATH: &str = "/pages/signin";
+const ADMIN_DASHBOARD_MAIN_PATH: &str = "/pages/main2";
+
+/// Next 관리자 로그인 페이지 URL(`employeeId` 쿼리로 아이디만 프리필, 비밀번호 미포함).
+/// 값이 설정되지 않았으면 None(버튼 비노출).
+pub fn admin_dashboard_login_url(employee_id: Option<&str>) -> Option<String> {
+    let base = ADMIN_DASHBOARD_URL?.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    let callback_url = ::js_sys::encode_uri_component(&format!("{base}{ADMIN_DASHBOARD_MAIN_PATH}"));
+    match employee_id.filter(|id| !id.is_empty()) {
+        Some(id) => {
+            let enc = ::js_sys::encode_uri_component(id);
+            Some(format!(
+                "{base}{ADMIN_DASHBOARD_LOGIN_PATH}?employeeId={enc}&callbackUrl={callback_url}"
+            ))
+        }
+        None => Some(format!(
+            "{base}{ADMIN_DASHBOARD_LOGIN_PATH}?callbackUrl={callback_url}"
+        )),
+    }
+}
+
 fn configured_base_url() -> Option<String> {
     API_BASE_URL.and_then(|base_url| {
         let trimmed = base_url.trim().trim_end_matches('/');
@@ -404,6 +435,216 @@ pub async fn fetch_feedback_stats(
     match resp.status() {
         200 => resp
             .json::<FeedbackStatsResponse>()
+            .await
+            .map_err(|e| FeedbackStatsError::Other(format!("Parse error: {e}"))),
+        401 => Err(FeedbackStatsError::Unauthorized),
+        403 => Err(FeedbackStatsError::Forbidden),
+        status => Err(FeedbackStatsError::Other(format!("HTTP {status}"))),
+    }
+}
+
+/// GET /api/records/workplans?status=&page=&pageSize= — 작업계획서 요약 목록(RecordsView).
+/// 로그인 필요(401은 `FeedbackStatsError::Unauthorized`로 매핑해 재사용).
+pub async fn fetch_workplans(
+    status: Option<&str>,
+    page: i64,
+    page_size: i64,
+) -> Result<WorkPlansResponse, FeedbackStatsError> {
+    let mut url = api_url(&format!("/api/records/workplans?page={page}&pageSize={page_size}"));
+    if let Some(s) = status.filter(|s| !s.is_empty()) {
+        let enc = ::js_sys::encode_uri_component(s);
+        url.push_str(&format!("&status={enc}"));
+    }
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| FeedbackStatsError::Other(format!("Network error: {e}")))?;
+
+    match resp.status() {
+        200 => resp
+            .json::<WorkPlansResponse>()
+            .await
+            .map_err(|e| FeedbackStatsError::Other(format!("Parse error: {e}"))),
+        401 => Err(FeedbackStatsError::Unauthorized),
+        403 => Err(FeedbackStatsError::Forbidden),
+        status => Err(FeedbackStatsError::Other(format!("HTTP {status}"))),
+    }
+}
+
+/// GET /api/records/inspections?status=&page=&pageSize= — 순회점검 요약 목록(RecordsView).
+pub async fn fetch_inspections(
+    status: Option<&str>,
+    page: i64,
+    page_size: i64,
+) -> Result<InspectionsResponse, FeedbackStatsError> {
+    let mut url = api_url(&format!("/api/records/inspections?page={page}&pageSize={page_size}"));
+    if let Some(s) = status.filter(|s| !s.is_empty()) {
+        let enc = ::js_sys::encode_uri_component(s);
+        url.push_str(&format!("&status={enc}"));
+    }
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| FeedbackStatsError::Other(format!("Network error: {e}")))?;
+
+    match resp.status() {
+        200 => resp
+            .json::<InspectionsResponse>()
+            .await
+            .map_err(|e| FeedbackStatsError::Other(format!("Parse error: {e}"))),
+        401 => Err(FeedbackStatsError::Unauthorized),
+        403 => Err(FeedbackStatsError::Forbidden),
+        status => Err(FeedbackStatsError::Other(format!("HTTP {status}"))),
+    }
+}
+
+/// GET /api/records/education?status=&page=&pageSize= — 교육이수 요약 목록(RecordsView).
+pub async fn fetch_education(
+    status: Option<&str>,
+    page: i64,
+    page_size: i64,
+) -> Result<EducationResponse, FeedbackStatsError> {
+    let mut url = api_url(&format!("/api/records/education?page={page}&pageSize={page_size}"));
+    if let Some(s) = status.filter(|s| !s.is_empty()) {
+        let enc = ::js_sys::encode_uri_component(s);
+        url.push_str(&format!("&status={enc}"));
+    }
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| FeedbackStatsError::Other(format!("Network error: {e}")))?;
+
+    match resp.status() {
+        200 => resp
+            .json::<EducationResponse>()
+            .await
+            .map_err(|e| FeedbackStatsError::Other(format!("Parse error: {e}"))),
+        401 => Err(FeedbackStatsError::Unauthorized),
+        403 => Err(FeedbackStatsError::Forbidden),
+        status => Err(FeedbackStatsError::Other(format!("HTTP {status}"))),
+    }
+}
+
+/// GET /api/records/environment?status=&page=&pageSize= — 작업환경측정 요약 목록(RecordsView).
+pub async fn fetch_environment(
+    status: Option<&str>,
+    page: i64,
+    page_size: i64,
+) -> Result<EnvironmentResponse, FeedbackStatsError> {
+    let mut url = api_url(&format!("/api/records/environment?page={page}&pageSize={page_size}"));
+    if let Some(s) = status.filter(|s| !s.is_empty()) {
+        let enc = ::js_sys::encode_uri_component(s);
+        url.push_str(&format!("&status={enc}"));
+    }
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| FeedbackStatsError::Other(format!("Network error: {e}")))?;
+
+    match resp.status() {
+        200 => resp
+            .json::<EnvironmentResponse>()
+            .await
+            .map_err(|e| FeedbackStatsError::Other(format!("Parse error: {e}"))),
+        401 => Err(FeedbackStatsError::Unauthorized),
+        403 => Err(FeedbackStatsError::Forbidden),
+        status => Err(FeedbackStatsError::Other(format!("HTTP {status}"))),
+    }
+}
+
+/// GET /api/records/nearmiss?status=&page=&pageSize= — 아차사고 요약 목록(RecordsView).
+pub async fn fetch_nearmiss(
+    status: Option<&str>,
+    page: i64,
+    page_size: i64,
+) -> Result<NearMissResponse, FeedbackStatsError> {
+    let mut url = api_url(&format!("/api/records/nearmiss?page={page}&pageSize={page_size}"));
+    if let Some(s) = status.filter(|s| !s.is_empty()) {
+        let enc = ::js_sys::encode_uri_component(s);
+        url.push_str(&format!("&status={enc}"));
+    }
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| FeedbackStatsError::Other(format!("Network error: {e}")))?;
+
+    match resp.status() {
+        200 => resp
+            .json::<NearMissResponse>()
+            .await
+            .map_err(|e| FeedbackStatsError::Other(format!("Parse error: {e}"))),
+        401 => Err(FeedbackStatsError::Unauthorized),
+        403 => Err(FeedbackStatsError::Forbidden),
+        status => Err(FeedbackStatsError::Other(format!("HTTP {status}"))),
+    }
+}
+
+/// GET /api/records/committee?status=&page=&pageSize= — 산업안전보건위원회 요약 목록(RecordsView).
+pub async fn fetch_committee(
+    status: Option<&str>,
+    page: i64,
+    page_size: i64,
+) -> Result<CommitteeResponse, FeedbackStatsError> {
+    let mut url = api_url(&format!("/api/records/committee?page={page}&pageSize={page_size}"));
+    if let Some(s) = status.filter(|s| !s.is_empty()) {
+        let enc = ::js_sys::encode_uri_component(s);
+        url.push_str(&format!("&status={enc}"));
+    }
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| FeedbackStatsError::Other(format!("Network error: {e}")))?;
+
+    match resp.status() {
+        200 => resp
+            .json::<CommitteeResponse>()
+            .await
+            .map_err(|e| FeedbackStatsError::Other(format!("Parse error: {e}"))),
+        401 => Err(FeedbackStatsError::Unauthorized),
+        403 => Err(FeedbackStatsError::Forbidden),
+        status => Err(FeedbackStatsError::Other(format!("HTTP {status}"))),
+    }
+}
+
+/// GET /api/records/stats?agentId= — 시작화면 상단 통계 카드 실 데이터(로그인 필요).
+pub async fn fetch_agent_stats(agent_id: &str) -> Result<AgentStatsResponse, FeedbackStatsError> {
+    let enc = ::js_sys::encode_uri_component(agent_id);
+    let url = api_url(&format!("/api/records/stats?agentId={enc}"));
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| FeedbackStatsError::Other(format!("Network error: {e}")))?;
+
+    match resp.status() {
+        200 => resp
+            .json::<AgentStatsResponse>()
+            .await
+            .map_err(|e| FeedbackStatsError::Other(format!("Parse error: {e}"))),
+        401 => Err(FeedbackStatsError::Unauthorized),
+        403 => Err(FeedbackStatsError::Forbidden),
+        status => Err(FeedbackStatsError::Other(format!("HTTP {status}"))),
+    }
+}
+
+/// GET /api/records/feedback?agent_id=&limit=&offset= — 로그인 사용자 본인의 피드백 목록
+/// (RecordsView가 permit 이외 에이전트에서 호출; admin 권한 불필요, 로그인만 필요).
+pub async fn fetch_my_feedback(
+    agent_id: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<MyFeedbackResponse, FeedbackStatsError> {
+    let enc = ::js_sys::encode_uri_component(agent_id);
+    let url = api_url(&format!(
+        "/api/records/feedback?agent_id={enc}&limit={limit}&offset={offset}"
+    ));
+    let resp = with_credentials(Request::get(&url))
+        .send()
+        .await
+        .map_err(|e| FeedbackStatsError::Other(format!("Network error: {e}")))?;
+
+    match resp.status() {
+        200 => resp
+            .json::<MyFeedbackResponse>()
             .await
             .map_err(|e| FeedbackStatsError::Other(format!("Parse error: {e}"))),
         401 => Err(FeedbackStatsError::Unauthorized),

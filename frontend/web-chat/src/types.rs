@@ -663,6 +663,132 @@ pub struct ReverifyListResponse {
     pub total: i64,
 }
 
+/// `GET /api/records/workplans` 응답 행 1건(작업계획서 요약, RecordsView 전용).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkPlanRow {
+    pub pwp_no: String,
+    pub title: String,
+    pub work_type_name: String,
+    pub apply_status: String,
+    pub apply_employee_name: String,
+    pub create_date: String,
+}
+
+/// `GET /api/records/workplans` 응답(페이지네이션).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct WorkPlansResponse {
+    pub items: Vec<WorkPlanRow>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// `GET /api/records/inspections` 응답 행 1건(순회점검 요약, RecordsView 전용).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectionRow {
+    pub srino: String,
+    pub employee_name: String,
+    pub department_name: String,
+    pub status: String,
+    pub repeat_cycle_date: String,
+    pub inspection_date: String,
+}
+
+/// `GET /api/records/inspections` 응답(페이지네이션).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct InspectionsResponse {
+    pub items: Vec<InspectionRow>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// `GET /api/records/education` 응답 행 1건(교육이수 요약, RecordsView 전용).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EducationRow {
+    pub eptno: String,
+    pub employee_name: String,
+    pub department_name: String,
+    pub education_completion_date: String,
+    pub test_pass_yn: String,
+}
+
+/// `GET /api/records/education` 응답(페이지네이션).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct EducationResponse {
+    pub items: Vec<EducationRow>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// `GET /api/records/environment` 응답 행 1건(작업환경측정 요약, RecordsView 전용).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentRow {
+    pub no: String,
+    pub title: String,
+    pub factory_name: String,
+    pub measure_date: String,
+    pub measure_type: String,
+    pub exceed_count: i64,
+    pub status: String,
+}
+
+/// `GET /api/records/environment` 응답(페이지네이션).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct EnvironmentResponse {
+    pub items: Vec<EnvironmentRow>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// `GET /api/records/nearmiss` 응답 행 1건(아차사고 요약, RecordsView 전용).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NearMissRow {
+    pub nmmno: String,
+    pub field_name: String,
+    pub declare_employee_name: String,
+    pub occurrence_date: String,
+    pub action_status_name: String,
+    pub action_content: String,
+}
+
+/// `GET /api/records/nearmiss` 응답(페이지네이션).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct NearMissResponse {
+    pub items: Vec<NearMissRow>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// `GET /api/records/committee` 응답 행 1건(산업안전보건위원회 요약, RecordsView 전용).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitteeRow {
+    pub shc_no: String,
+    pub title: String,
+    pub location: String,
+    pub start_date: String,
+    pub sign_status: String,
+    pub meeting_type: String,
+}
+
+/// `GET /api/records/committee` 응답(페이지네이션).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct CommitteeResponse {
+    pub items: Vec<CommitteeRow>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
 /// `GET /api/admin/feedback/comments` 응답(페이지네이션).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct FeedbackCommentsResponse {
@@ -686,6 +812,42 @@ pub struct CommentRow {
     pub created_at: String,
     #[serde(default)]
     pub resolved: bool,
+}
+
+/// `GET /api/records/feedback` 응답 행 1건(로그인 사용자 본인의 피드백, RecordsView 전용).
+/// 관리자 집계용 `CommentRow`와 달리 admin 권한 없이 아무 로그인 사용자나 조회 가능하다.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct MyFeedbackRow {
+    pub agent_id: String,
+    pub rating: String,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub created_at: String,
+}
+
+/// `GET /api/records/feedback` 응답(페이지네이션).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct MyFeedbackResponse {
+    pub items: Vec<MyFeedbackRow>,
+    pub total: i64,
+}
+
+/// `GET /api/records/stats` 응답 카드 1건(시작화면 상단 통계 카드).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct AgentStatCard {
+    pub label: String,
+    pub value: i64,
+    pub sub: String,
+    #[serde(default)]
+    pub is_static: bool,
+}
+
+/// `GET /api/records/stats` 응답.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct AgentStatsResponse {
+    pub cards: Vec<AgentStatCard>,
 }
 
 /// `POST /api/feedback` 요청. 답변 1개(특정 버전)에 대한 👍/👎 평가.
