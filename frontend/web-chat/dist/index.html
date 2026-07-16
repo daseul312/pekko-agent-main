@@ -6,8 +6,8 @@
     <title>Core Agentic AI — EHS AI 채팅</title>
     
 <script type="module">
-import init, * as bindings from '/pekko-agent-web-chat-1487540b0f231e26.js';
-const wasm = await init({ module_or_path: '/pekko-agent-web-chat-1487540b0f231e26_bg.wasm' });
+import init, * as bindings from '/pekko-agent-web-chat-74135c8c5bbe9e92.js';
+const wasm = await init({ module_or_path: '/pekko-agent-web-chat-74135c8c5bbe9e92_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -1488,6 +1488,11 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         border-radius: 16px;
         padding: 26px 24px;
         box-shadow: var(--shadow-sm);
+        cursor: pointer;
+        transition: transform 0.15s, box-shadow 0.15s;
+      }
+      .welcome-stat-card:hover {
+        transform: translateY(-2px);
       }
       .welcome-stat-card.highlight {
         background: var(--accent);
@@ -1954,6 +1959,11 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         border-radius: 16px;
         padding: 26px 24px;
         box-shadow: var(--shadow-sm);
+        cursor: pointer;
+        transition: transform 0.15s, box-shadow 0.15s;
+      }
+      .welcome-stat-card:hover {
+        transform: translateY(-2px);
       }
       .welcome-stat-card.highlight {
         background: var(--accent);
@@ -3718,6 +3728,67 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
       }
       .fb-more-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
       .fb-more-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+      /* RecordsView(에이전트별 요약 목록) 전용 */
+      .records-table {
+        width: 100%;
+        table-layout: fixed;
+        border-collapse: collapse;
+        font-size: 13px;
+        margin-top: 10px;
+      }
+      .records-table th {
+        text-align: left;
+        padding: 8px 10px;
+        color: var(--muted);
+        font-weight: 600;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+      .records-table td {
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--border);
+        color: var(--agent-card-text);
+        vertical-align: top;
+        overflow-wrap: anywhere;
+      }
+      .records-table-title {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .records-table-row:last-child td { border-bottom: none; }
+      .records-pagination {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        margin-top: 14px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .records-pagination .fb-more-btn { width: auto; padding: 8px 16px; margin-top: 0; }
+      .records-footer {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        margin-top: 24px;
+      }
+      .records-footer-note {
+        margin: 0;
+        font-size: 13px;
+        color: var(--muted);
+        text-align: center;
+      }
+      .records-admin-link {
+        display: inline-block;
+        text-decoration: none;
+        text-align: center;
+      }
+      @media (max-width: 760px) {
+        .records-table { display: block; overflow-x: auto; }
+      }
       @media (max-width: 760px) {
         .fb-kpi-grid { grid-template-columns: repeat(2, 1fr); }
         .fb-two-col { grid-template-columns: 1fr; }
@@ -5745,6 +5816,6 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         });
       }
     </script>
-  <link rel="modulepreload" href="/pekko-agent-web-chat-1487540b0f231e26.js" crossorigin="anonymous" integrity="sha384-+x/bUva4f+lWGvc/FQt2UWBFTXvPqLFTNK/y25tw/KDdgRo6W6kwewQTXguXvXSK"><link rel="preload" href="/pekko-agent-web-chat-1487540b0f231e26_bg.wasm" crossorigin="anonymous" integrity="sha384-G9Mn4ZaKNY7GrXTr65nVxrVzYC22cct7p+gJp9WJdO11ywUwgkoSt442BG4Lss5R" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/pekko-agent-web-chat-74135c8c5bbe9e92.js" crossorigin="anonymous" integrity="sha384-waTqTf0uRou9bfDVdoBujH4Zk4wgEW386NOgHyhhjX3cPZxtWcYZrA9LAtTQ1AH+"><link rel="preload" href="/pekko-agent-web-chat-74135c8c5bbe9e92_bg.wasm" crossorigin="anonymous" integrity="sha384-KH3PTudjcMSQrf60N8SBl568UKiOacZ47TQ7gtOWVyDAXNftjtFtru9OcDrJY/li" as="fetch" type="application/wasm"></head>
   <body></body>
 </html>

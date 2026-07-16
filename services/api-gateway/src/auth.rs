@@ -185,6 +185,24 @@ pub async fn login_handler(
     // 프론트가 RSA 공개키로 암호화한 비밀번호를 개인키로 복호화.
     let password = decrypt_password(state.rsa_private_key.as_ref(), &req.password_encrypted)?;
 
+    // 회사코드 자체가 유효한지 먼저 확인해, 존재하지 않는 회사는 계정 검증과 구분된 메시지로 안내한다.
+    let company_exists = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM public."CorporateInformationManagement" WHERE "companyCode" = $1"#,
+    )
+    .bind(&req.company_code)
+    .fetch_one(state.pg_pool.as_ref())
+    .await
+    .map_err(|e| internal(format!("DB 오류: {e}")))?;
+
+    if company_exists == 0 {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(LoginError {
+                error: "존재하지 않는 회사입니다.".to_string(),
+            }),
+        ));
+    }
+
     let row = sqlx::query_as::<_, EmployeeRow>(
         r#"SELECT "employeeId", "employeeName", "companyCode", "password", "role"::text AS role, eino
            FROM public."EmployeeInfo"

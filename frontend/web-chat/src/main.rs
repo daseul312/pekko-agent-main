@@ -1087,6 +1087,7 @@ fn app() -> Html {
     // 인앱 알림(헤더 종). 로그인 시 주기 폴링으로 갱신한다.
     let notifications = use_state(types::NotificationsResponse::default);
     let is_login_modal_open = use_state(|| false);
+    let login_company_code = use_state(String::new);
     let login_id = use_state(String::new);
     let login_password = use_state(String::new);
     let login_error = use_state(|| Option::<String>::None);
@@ -1331,6 +1332,7 @@ fn app() -> Html {
 
     let on_logout = {
         let auth_user = auth_user.clone();
+        let login_company_code = login_company_code.clone();
         let login_id = login_id.clone();
         let login_password = login_password.clone();
         Callback::from(move |_: ()| {
@@ -1338,7 +1340,8 @@ fn app() -> Html {
                 api::logout().await;
             });
             auth_user.set(None);
-            // 로그아웃 시 이전 아이디/비밀번호가 로그인 팝업에 남지 않도록 비운다.
+            // 로그아웃 시 이전 회사코드/아이디/비밀번호가 로그인 팝업에 남지 않도록 비운다.
+            login_company_code.set(String::new());
             login_id.set(String::new());
             login_password.set(String::new());
         })
@@ -1354,17 +1357,19 @@ fn app() -> Html {
     let on_login_submit = {
         let auth_user = auth_user.clone();
         let is_login_modal_open = is_login_modal_open.clone();
+        let login_company_code = login_company_code.clone();
         let login_id = login_id.clone();
         let login_password = login_password.clone();
         let login_error = login_error.clone();
         let is_logging_in = is_logging_in.clone();
 
         Callback::from(move |_: MouseEvent| {
+            let company_code = (*login_company_code).clone();
             let id = (*login_id).clone();
             let password = (*login_password).clone();
 
-            if id.is_empty() || password.is_empty() {
-                login_error.set(Some("아이디와 비밀번호를 입력해주세요.".into()));
+            if company_code.is_empty() || id.is_empty() || password.is_empty() {
+                login_error.set(Some("회사코드, 아이디, 비밀번호를 입력해주세요.".into()));
                 return;
             }
 
@@ -1376,8 +1381,7 @@ fn app() -> Html {
 
             is_logging_in.set(true);
             spawn_local(async move {
-                // 단일 회사 배포 기준 회사코드 "10" 고정. 다회사면 모달에 입력 필드 추가.
-                match api::login(id, password, "10".to_string()).await {
+                match api::login(id, password, company_code).await {
                     Ok(user) => {
                         auth_user.set(Some(user));
                         login_error.set(None);
@@ -1403,10 +1407,12 @@ fn app() -> Html {
     let on_continue_without_login = {
         let is_login_modal_open = is_login_modal_open.clone();
         let login_error = login_error.clone();
+        let login_company_code = login_company_code.clone();
         let login_password = login_password.clone();
         let login_id = login_id.clone();
         Callback::from(move |_: MouseEvent| {
             login_error.set(None);
+            login_company_code.set(String::new());
             login_password.set(String::new());
             login_id.set(String::new());
             is_login_modal_open.set(false);
@@ -2603,12 +2609,25 @@ fn app() -> Html {
             { if *is_login_modal_open {
                 let on_close = {
                     let is_login_modal_open = is_login_modal_open.clone();
+                    let login_company_code = login_company_code.clone();
                     let login_password = login_password.clone();
                     let login_id = login_id.clone();
                     Callback::from(move |_: MouseEvent| {
                         is_login_modal_open.set(false);
+                        login_company_code.set(String::new());
                         login_password.set(String::new());
                         login_id.set(String::new());
+                    })
+                };
+                let on_company_code_input = {
+                    let login_company_code = login_company_code.clone();
+                    Callback::from(move |e: InputEvent| {
+                        if let Some(target) = e.target() {
+                            use wasm_bindgen::JsCast;
+                            if let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() {
+                                login_company_code.set(input.value());
+                            }
+                        }
                     })
                 };
                 let on_id_input = {
@@ -2648,13 +2667,23 @@ fn app() -> Html {
                             </div>
                             <div class="login-form">
                                 <div class="form-group">
+                                    <label>{ "회사코드" }</label>
+                                    <input
+                                        type="text"
+                                        value={(*login_company_code).clone()}
+                                        oninput={on_company_code_input}
+                                        onkeydown={on_login_keydown.clone()}
+                                        autofocus=true
+                                        autocomplete="off"
+                                    />
+                                </div>
+                                <div class="form-group">
                                     <label>{ "아이디" }</label>
                                     <input
                                         type="text"
                                         value={(*login_id).clone()}
                                         oninput={on_id_input}
                                         onkeydown={on_login_keydown.clone()}
-                                        autofocus=true
                                         autocomplete="username"
                                     />
                                 </div>
