@@ -5,6 +5,7 @@
 //! 월별 트렌드 → 최근 부정 코멘트 테이블(더 보기). 차트는 기존 `ChartBlock`을 재사용.
 //! 접근은 백엔드의 `FEEDBACK_ADMIN_IDS` 허용목록으로 게이팅된다(401/403 분기).
 
+use gloo_storage::{LocalStorage, Storage};
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
@@ -16,6 +17,8 @@ use crate::types::{
 };
 
 const COMMENTS_PAGE: i64 = 20;
+/// 메인 앱(main.rs)과 동일한 키를 써서 다크모드 설정을 공유한다.
+const THEME_STORAGE_KEY: &str = "pekko_theme_dark";
 
 #[derive(Clone, PartialEq)]
 enum StatsView {
@@ -225,6 +228,17 @@ pub fn admin_feedback() -> Html {
     let comments_total = use_state(|| 0i64);
     let loading_more = use_state(|| false);
     let reverify = use_state(Vec::<ReverifyRow>::new);
+    let is_dark_mode = use_state(|| LocalStorage::get::<bool>(THEME_STORAGE_KEY).unwrap_or(false));
+
+    // 메인 앱과 같은 저장소 키를 쓰므로, 토글 시 값을 영속화해두면 채팅 화면으로
+    // 돌아갔을 때도 동일한 테마가 유지된다.
+    {
+        let is_dark_mode_state = is_dark_mode.clone();
+        use_effect_with((*is_dark_mode_state).clone(), move |dark| {
+            let _ = LocalStorage::set(THEME_STORAGE_KEY, dark);
+            || ()
+        });
+    }
 
     // 기간 또는 추세 집계 단위 변경 시 통계 재조회.
     {
@@ -475,8 +489,14 @@ pub fn admin_feedback() -> Html {
         }
     });
 
+    let on_theme_toggle = {
+        let is_dark_mode = is_dark_mode.clone();
+        Callback::from(move |_: MouseEvent| is_dark_mode.set(!*is_dark_mode))
+    };
+    let root_class = classes!("admin-fb-root", if *is_dark_mode { "dark" } else { "" });
+
     html! {
-        <div class="admin-fb-root">
+        <div class={root_class}>
             <header class="admin-fb-header">
                 <button class="admin-fb-back" onclick={on_back} title="채팅으로 돌아가기">
                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
@@ -485,6 +505,29 @@ pub fn admin_feedback() -> Html {
                 </button>
                 <span class="admin-fb-logo">{ "EHS AI" }</span>
                 <span class="admin-fb-subtitle">{ "답변 피드백 통계" }</span>
+                <button class="theme-toggle-btn admin-fb-theme-toggle" onclick={on_theme_toggle} title={if *is_dark_mode { "라이트 모드로 변경" } else { "다크 모드로 변경" }}>
+                    { if *is_dark_mode {
+                        html! {
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="theme-icon moon">
+                                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                            </svg>
+                        }
+                    } else {
+                        html! {
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="theme-icon sun">
+                                <circle cx="12" cy="12" r="5"></circle>
+                                <line x1="12" y1="1" x2="12" y2="3"></line>
+                                <line x1="12" y1="21" x2="12" y2="23"></line>
+                                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                                <line x1="1" y1="12" x2="3" y2="12"></line>
+                                <line x1="21" y1="12" x2="23" y2="12"></line>
+                                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                            </svg>
+                        }
+                    } }
+                </button>
             </header>
             <main class="admin-fb-main">
                 { period_chips }
