@@ -16,6 +16,8 @@ pub struct EhsQueryTool {
     pool: Arc<PgPool>,
     /// `is_deleted` 컬럼을 가진 테이블 이름(소문자) 집합. 최초 1회만 조회 후 캐시.
     is_deleted_tables: OnceCell<HashSet<String>>,
+    /// `use_yn` 컬럼을 가진 테이블 이름(소문자) 집합. 최초 1회만 조회 후 캐시.
+    use_yn_tables: OnceCell<HashSet<String>>,
 }
 
 impl EhsQueryTool {
@@ -23,6 +25,7 @@ impl EhsQueryTool {
         Self {
             pool,
             is_deleted_tables: OnceCell::new(),
+            use_yn_tables: OnceCell::new(),
         }
     }
 
@@ -47,6 +50,31 @@ impl EhsQueryTool {
             Ok(set) => set,
             Err(e) => {
                 warn!(error = %e, "is_deleted 스키마 조회 실패 — 삭제 가드 이번 호출 건너뜀");
+                EMPTY_TABLE_SET.get_or_init(HashSet::new)
+            }
+        }
+    }
+
+    /// `use_yn` 컬럼을 가진 테이블 집합을 반환한다(소문자). 최초 호출 시 한 번만
+    /// information_schema에서 조회해 캐시한다. 조회 실패 시 빈 집합을 반환해 가드를
+    /// 이번 호출에 한해 건너뛴다(전체 쿼리를 막지 않기 위한 fail-open).
+    async fn use_yn_tables(&self) -> &HashSet<String> {
+        match self
+            .use_yn_tables
+            .get_or_try_init(|| async {
+                let rows = sqlx::query_scalar::<_, String>(
+                    "SELECT DISTINCT lower(table_name) FROM information_schema.columns \
+                     WHERE lower(column_name) = 'use_yn'",
+                )
+                .fetch_all(self.pool.as_ref())
+                .await?;
+                Ok::<HashSet<String>, sqlx::Error>(rows.into_iter().collect())
+            })
+            .await
+        {
+            Ok(set) => set,
+            Err(e) => {
+                warn!(error = %e, "use_yn 스키마 조회 실패 — 사용여부 가드 이번 호출 건너뜀");
                 EMPTY_TABLE_SET.get_or_init(HashSet::new)
             }
         }
@@ -93,6 +121,22 @@ fn has_safe_deleted_filter(sql: &str) -> bool {
         || check.contains("is_deleted<>'y'")
         || check.contains("is_deleted!='y'")
         || check.contains("is_deletednotin('y')")
+}
+
+/// use_yn 컬럼을 가진 테이블을 조회하면서, 사용 중인 행(use_yn='Y')으로 제한하는
+/// 조건이 있는지 검사한다. 명시적으로 'N'(미사용)을 조회하려는 쿼리는 거부 대상이다.
+fn has_safe_use_yn_filter(sql: &str) -> bool {
+    let check: String = sql.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+
+    if check.contains("use_yn='n'") || check.contains("use_ynin('n')") {
+        return false;
+    }
+
+    check.contains("use_yn='y'")
+        || check.contains("use_ynin('y')")
+        || check.contains("use_yn<>'n'")
+        || check.contains("use_yn!='n'")
+        || check.contains("use_ynnotin('n')")
 }
 
 #[derive(Deserialize)]
@@ -214,6 +258,24 @@ impl Tool for EhsQueryTool {
                     "삭제된 데이터는 조회할 수 없습니다. 조회 대상 테이블에 is_deleted 컬럼이 \
                      있으므로 WHERE 절에 반드시 is_deleted = 'N' 조건을 추가해 다시 쿼리하세요 \
                      (삭제된 'Y' 행은 목록·집계 어디에도 포함 금지)."
+                        .to_string(),
+                ));
+            }
+        }
+
+        // [하드 가드] 미사용 데이터(use_yn='N') 노출 차단.
+        // use_yn 컬럼이 있는 테이블을 조회하면서 use_yn='Y' 조건이 없으면 쿼리를 거부한다.
+        let use_yn_tables = self.use_yn_tables().await;
+        if !use_yn_tables.is_empty() {
+            let touches_use_yn = extract_referenced_tables(&params.sql)
+                .iter()
+                .any(|t| use_yn_tables.contains(t));
+            if touches_use_yn && !has_safe_use_yn_filter(&params.sql) {
+                warn!(sql = %params.sql, "use_yn 필터 누락 쿼리 거부");
+                return Ok(ToolOutput::error(
+                    "사용 중이 아닌 데이터는 조회할 수 없습니다. 조회 대상 테이블에 use_yn 컬럼이 \
+                     있으므로 WHERE 절에 반드시 use_yn = 'Y' 조건을 추가해 다시 쿼리하세요 \
+                     (미사용 'N' 행은 목록·집계 어디에도 포함 금지)."
                         .to_string(),
                 ));
             }
