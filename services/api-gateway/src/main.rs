@@ -26,7 +26,7 @@ use pekko_agent_security::{RbacManager, TenantManager, AuditLogger};
 use sqlx::PgPool;
 
 mod auth;
-use auth::{AuthIdentity, OptionalAuth};
+use auth::{AuthIdentity, OptionalAuth, RequireAuth};
 
 
 /// Shared application state with all services
@@ -1003,11 +1003,12 @@ async fn list_agents(State(state): State<AppState>) -> impl IntoResponse {
 async fn query_agent(
     Path(agent_id): Path<String>,
     State(state): State<AppState>,
-    OptionalAuth(auth): OptionalAuth,
+    RequireAuth(auth): RequireAuth,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
     let noop = |_: ProcessEvent| {};
+    let auth = Some(auth);
     run_agent_query_pipeline(&state, &agent_id, &req, session_id, &noop, false, &auth)
         .await
         .map(Json)
@@ -1018,12 +1019,13 @@ async fn query_agent(
 async fn query_agent_stream(
     Path(agent_id): Path<String>,
     State(state): State<AppState>,
-    OptionalAuth(auth): OptionalAuth,
+    RequireAuth(auth): RequireAuth,
     Json(req): Json<QueryRequest>,
 ) -> axum::response::Response {
     use axum::body::{Body, Bytes};
     use tokio_stream::wrappers::UnboundedReceiverStream;
 
+    let auth = Some(auth);
     let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
     let (tx, rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<Bytes, std::convert::Infallible>>();
@@ -2234,11 +2236,12 @@ async fn compose_multi_agent_response(
 /// POST /api/query - Smart-route a query to one or more agents when no agent is selected.
 async fn query_home(
     State(state): State<AppState>,
-    OptionalAuth(auth): OptionalAuth,
+    RequireAuth(auth): RequireAuth,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
     let noop = |_: ProcessEvent| {};
+    let auth = Some(auth);
     run_query_pipeline(&state, &req, session_id, &noop, false, &auth)
         .await
         .map(Json)
@@ -2249,12 +2252,13 @@ async fn query_home(
 /// the live processing steps. The terminal line is `{"type":"final", ...QueryResponse}`.
 async fn query_home_stream(
     State(state): State<AppState>,
-    OptionalAuth(auth): OptionalAuth,
+    RequireAuth(auth): RequireAuth,
     Json(req): Json<QueryRequest>,
 ) -> axum::response::Response {
     use axum::body::{Body, Bytes};
     use tokio_stream::wrappers::UnboundedReceiverStream;
 
+    let auth = Some(auth);
     let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
     let (tx, rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<Bytes, std::convert::Infallible>>();

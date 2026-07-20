@@ -344,3 +344,25 @@ impl<S: Send + Sync> FromRequestParts<S> for OptionalAuth {
         Ok(OptionalAuth(identity))
     }
 }
+
+/// 요청 쿠키에서 로그인 신원을 추출하는 추출기. 쿠키가 없거나 토큰이 무효하면
+/// 401 Unauthorized로 거부한다(로그인 필수 엔드포인트용).
+pub struct RequireAuth(pub AuthIdentity);
+
+#[axum::async_trait]
+impl<S: Send + Sync> FromRequestParts<S> for RequireAuth {
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let jar = CookieJar::from_request_parts(parts, state)
+            .await
+            .unwrap_or_default();
+        let identity = jar.get(COOKIE_NAME).and_then(|c| verify_token(c.value()));
+        identity.map(RequireAuth).ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "로그인이 필요합니다." })),
+            )
+        })
+    }
+}

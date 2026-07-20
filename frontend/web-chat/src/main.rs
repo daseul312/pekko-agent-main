@@ -1170,10 +1170,8 @@ fn app() -> Html {
                         }
                     }
                     _ => {
-                        // 비로그인인데 공유 링크 401→로그인 유도로 넘어왔다면 로그인 모달을 자동으로 연다.
-                        if pending_share_next().is_some() {
-                            is_login_modal_open.set(true);
-                        }
+                        // 비로그인이면 로그인 없이는 서비스를 이용할 수 없으므로 항상 로그인 모달을 연다.
+                        is_login_modal_open.set(true);
                     }
                 }
             });
@@ -1331,19 +1329,15 @@ fn app() -> Html {
     };
 
     let on_logout = {
-        let auth_user = auth_user.clone();
-        let login_company_code = login_company_code.clone();
-        let login_id = login_id.clone();
-        let login_password = login_password.clone();
         Callback::from(move |_: ()| {
             spawn_local(async move {
                 api::logout().await;
+                // 메인으로 이동 후 새로고침해 상태를 초기화한다. 로그인 안 된 상태이므로
+                // /auth/me 처리 로직에 의해 로그인 팝업이 자동으로 다시 뜬다.
+                if let Some(window) = web_sys::window() {
+                    let _ = window.location().set_href("/");
+                }
             });
-            auth_user.set(None);
-            // 로그아웃 시 이전 회사코드/아이디/비밀번호가 로그인 팝업에 남지 않도록 비운다.
-            login_company_code.set(String::new());
-            login_id.set(String::new());
-            login_password.set(String::new());
         })
     };
 
@@ -1400,22 +1394,6 @@ fn app() -> Html {
                 }
                 is_logging_in.set(false);
             });
-        })
-    };
-
-    // 모달을 닫고 비로그인(전체 조회) 상태로 계속 이용.
-    let on_continue_without_login = {
-        let is_login_modal_open = is_login_modal_open.clone();
-        let login_error = login_error.clone();
-        let login_company_code = login_company_code.clone();
-        let login_password = login_password.clone();
-        let login_id = login_id.clone();
-        Callback::from(move |_: MouseEvent| {
-            login_error.set(None);
-            login_company_code.set(String::new());
-            login_password.set(String::new());
-            login_id.set(String::new());
-            is_login_modal_open.set(false);
         })
     };
 
@@ -2607,18 +2585,6 @@ fn app() -> Html {
                 }
             } else { html! {} } }
             { if *is_login_modal_open {
-                let on_close = {
-                    let is_login_modal_open = is_login_modal_open.clone();
-                    let login_company_code = login_company_code.clone();
-                    let login_password = login_password.clone();
-                    let login_id = login_id.clone();
-                    Callback::from(move |_: MouseEvent| {
-                        is_login_modal_open.set(false);
-                        login_company_code.set(String::new());
-                        login_password.set(String::new());
-                        login_id.set(String::new());
-                    })
-                };
                 let on_company_code_input = {
                     let login_company_code = login_company_code.clone();
                     Callback::from(move |e: InputEvent| {
@@ -2652,7 +2618,6 @@ fn app() -> Html {
                         }
                     })
                 };
-                let on_continue_without_login = on_continue_without_login.clone();
                 let on_toggle_password = {
                     let show_password = show_password.clone();
                     Callback::from(move |_: MouseEvent| show_password.set(!*show_password))
@@ -2660,7 +2625,7 @@ fn app() -> Html {
                 let password_input_type = if *show_password { "text" } else { "password" };
 
                 html! {
-                    <div class="modal-backdrop" onclick={on_close}>
+                    <div class="modal-backdrop">
                         <div class="login-modal" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
                             <div class="login-header">
                                 <h3>{ "로그인" }</h3>
@@ -2735,13 +2700,6 @@ fn app() -> Html {
                                     } else {
                                         { "로그인" }
                                     }
-                                </button>
-                                <button
-                                    type="button"
-                                    class="login-secondary-btn"
-                                    onclick={on_continue_without_login}
-                                >
-                                    { "로그인하지 않고 이용하기" }
                                 </button>
                             </div>
                         </div>
