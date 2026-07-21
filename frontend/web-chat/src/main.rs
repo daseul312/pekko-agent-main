@@ -1092,6 +1092,8 @@ fn app() -> Html {
     let login_password = use_state(String::new);
     let login_error = use_state(|| Option::<String>::None);
     let is_logging_in = use_state(|| false);
+    // 서비스 관리자 로그인 모드(회사코드 입력 없이 admin_id/비밀번호만 사용).
+    let is_admin_login_mode = use_state(|| false);
     let show_password = use_state(|| false);
     let is_dark_mode = use_state(|| LocalStorage::get::<bool>(THEME_STORAGE_KEY).unwrap_or(false));
     let is_mobile_sidebar_open = use_state(|| false);
@@ -1356,13 +1358,20 @@ fn app() -> Html {
         let login_password = login_password.clone();
         let login_error = login_error.clone();
         let is_logging_in = is_logging_in.clone();
+        let is_admin_login_mode = is_admin_login_mode.clone();
 
         Callback::from(move |_: MouseEvent| {
+            let admin_mode = *is_admin_login_mode;
             let company_code = (*login_company_code).clone();
             let id = (*login_id).clone();
             let password = (*login_password).clone();
 
-            if company_code.is_empty() || id.is_empty() || password.is_empty() {
+            if admin_mode {
+                if id.is_empty() || password.is_empty() {
+                    login_error.set(Some("아이디, 비밀번호를 입력해주세요.".into()));
+                    return;
+                }
+            } else if company_code.is_empty() || id.is_empty() || password.is_empty() {
                 login_error.set(Some("회사코드, 아이디, 비밀번호를 입력해주세요.".into()));
                 return;
             }
@@ -1375,7 +1384,12 @@ fn app() -> Html {
 
             is_logging_in.set(true);
             spawn_local(async move {
-                match api::login(id, password, company_code).await {
+                let result = if admin_mode {
+                    api::admin_login(id, password).await
+                } else {
+                    api::login(id, password, company_code).await
+                };
+                match result {
                     Ok(user) => {
                         auth_user.set(Some(user));
                         login_error.set(None);
@@ -2623,25 +2637,36 @@ fn app() -> Html {
                     Callback::from(move |_: MouseEvent| show_password.set(!*show_password))
                 };
                 let password_input_type = if *show_password { "text" } else { "password" };
+                let on_toggle_admin_mode = {
+                    let is_admin_login_mode = is_admin_login_mode.clone();
+                    let login_error = login_error.clone();
+                    Callback::from(move |_: MouseEvent| {
+                        is_admin_login_mode.set(!*is_admin_login_mode);
+                        login_error.set(None);
+                    })
+                };
+                let admin_mode = *is_admin_login_mode;
 
                 html! {
                     <div class="modal-backdrop">
                         <div class="login-modal" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
                             <div class="login-header">
-                                <h3>{ "로그인" }</h3>
+                                <h3>{ if admin_mode { "서비스 관리자 로그인" } else { "로그인" } }</h3>
                             </div>
                             <div class="login-form">
-                                <div class="form-group">
-                                    <label>{ "회사코드" }</label>
-                                    <input
-                                        type="text"
-                                        value={(*login_company_code).clone()}
-                                        oninput={on_company_code_input}
-                                        onkeydown={on_login_keydown.clone()}
-                                        autofocus=true
-                                        autocomplete="off"
-                                    />
-                                </div>
+                                if !admin_mode {
+                                    <div class="form-group">
+                                        <label>{ "회사코드" }</label>
+                                        <input
+                                            type="text"
+                                            value={(*login_company_code).clone()}
+                                            oninput={on_company_code_input}
+                                            onkeydown={on_login_keydown.clone()}
+                                            autofocus=true
+                                            autocomplete="off"
+                                        />
+                                    </div>
+                                }
                                 <div class="form-group">
                                     <label>{ "아이디" }</label>
                                     <input
@@ -2700,6 +2725,13 @@ fn app() -> Html {
                                     } else {
                                         { "로그인" }
                                     }
+                                </button>
+                                <button
+                                    type="button"
+                                    class="login-secondary-btn"
+                                    onclick={on_toggle_admin_mode}
+                                >
+                                    { if admin_mode { "일반 로그인으로 돌아가기" } else { "서비스 관리자로 로그인" } }
                                 </button>
                             </div>
                         </div>

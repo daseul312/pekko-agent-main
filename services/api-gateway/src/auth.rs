@@ -20,6 +20,9 @@ const COOKIE_NAME: &str = "pekko_session";
 const SESSION_HOURS: i64 = 8;
 /// 단일 회사 배포 기본 회사코드. 다회사면 로그인 요청에 명시.
 const DEFAULT_COMPANY_CODE: &str = "10";
+/// 서비스(전사) 관리자 role 값. `EmployeeInfo`에 있는 회사 소속 계정이 아니라,
+/// env(`SERVICE_ADMIN_ID`/`SERVICE_ADMIN_PASSWORD_HASH`)로 인증되는 별도 계정에만 부여된다.
+pub const SERVICE_ADMIN_ROLE: &str = "SERVICE_ADMIN";
 
 fn jwt_secret() -> String {
     std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-insecure-secret-change-me".to_string())
@@ -61,6 +64,14 @@ pub struct LoginRequest {
     pub password_encrypted: String,
 }
 
+/// 서비스 관리자 로그인 요청. 회사코드 없음 — `EmployeeInfo`와 무관한 별도 계정.
+#[derive(Debug, Deserialize)]
+pub struct AdminLoginRequest {
+    pub admin_id: String,
+    /// RSA-OAEP(SHA-256)로 암호화한 비밀번호의 base64 문자열.
+    pub password_encrypted: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct PublicKeyResponse {
     pub public_key_pem: String,
@@ -75,7 +86,7 @@ pub struct LoginResponse {
     pub expires_at: i64,
     /// 프로필 이미지 S3 URL(없으면 null).
     pub profile_image_url: Option<String>,
-    /// 이 사용자가 피드백 통계(관리자 페이지)를 볼 수 있는지(`FEEDBACK_ADMIN_IDS` 허용목록).
+    /// 이 사용자가 피드백 통계(관리자 페이지)를 볼 수 있는지(`SERVICE_ADMIN_ROLE` 세션 여부).
     /// 프론트가 헤더의 관리자 버튼 노출 여부를 판단하는 데 쓴다.
     pub is_feedback_admin: bool,
 }
@@ -247,7 +258,6 @@ pub async fn login_handler(
     .map_err(|e| internal(format!("토큰 생성 실패: {e}")))?;
 
     let jar = jar.add(build_session_cookie(token));
-    let is_feedback_admin = crate::is_feedback_admin(&row.employee_id);
     Ok((
         jar,
         Json(LoginResponse {
@@ -257,7 +267,62 @@ pub async fn login_handler(
             role,
             expires_at,
             profile_image_url,
-            is_feedback_admin,
+            is_feedback_admin: false,
+        }),
+    ))
+}
+
+/// POST /auth/admin-login — 서비스(전사) 관리자 로그인. `EmployeeInfo`를 전혀 거치지 않고
+/// env(`SERVICE_ADMIN_ID`/`SERVICE_ADMIN_PASSWORD_HASH`)로만 검증한다. 미설정이면 항상 실패
+/// (안전 기본값). 발급되는 세션은 `company_code`가 비어 있고 role이 [`SERVICE_ADMIN_ROLE`]이라,
+/// 피드백 관리 API에서 회사 필터를 우회해 전사 데이터를 조회할 수 있다.
+pub async fn admin_login_handler(
+    State(state): State<crate::AppState>,
+    jar: CookieJar,
+    Json(req): Json<AdminLoginRequest>,
+) -> Result<(CookieJar, Json<LoginResponse>), (StatusCode, Json<LoginError>)> {
+    let password = decrypt_password(state.rsa_private_key.as_ref(), &req.password_encrypted)?;
+
+    let expected_id = std::env::var("SERVICE_ADMIN_ID").unwrap_or_default();
+    let expected_hash = std::env::var("SERVICE_ADMIN_PASSWORD_HASH").unwrap_or_default();
+    if expected_id.trim().is_empty() || expected_hash.trim().is_empty() {
+        return Err(unauthorized());
+    }
+    if req.admin_id.trim() != expected_id.trim() {
+        return Err(unauthorized());
+    }
+    let verified = bcrypt::verify(&password, &expected_hash).unwrap_or(false);
+    if !verified {
+        return Err(unauthorized());
+    }
+
+    let expires_at = (chrono::Utc::now() + chrono::Duration::hours(SESSION_HOURS)).timestamp();
+    let admin_id = req.admin_id.trim().to_string();
+    let claims = Claims {
+        sub: admin_id.clone(),
+        company_code: String::new(),
+        role: SERVICE_ADMIN_ROLE.to_string(),
+        name: "서비스 관리자".to_string(),
+        exp: expires_at,
+    };
+    let token = encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(jwt_secret().as_bytes()),
+    )
+    .map_err(|e| internal(format!("토큰 생성 실패: {e}")))?;
+
+    let jar = jar.add(build_session_cookie(token));
+    Ok((
+        jar,
+        Json(LoginResponse {
+            employee_id: admin_id,
+            employee_name: "서비스 관리자".to_string(),
+            company_code: String::new(),
+            role: SERVICE_ADMIN_ROLE.to_string(),
+            expires_at,
+            profile_image_url: None,
+            is_feedback_admin: true,
         }),
     ))
 }
@@ -272,26 +337,31 @@ pub async fn me_handler(
     OptionalAuth(auth): OptionalAuth,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<LoginError>)> {
     let id = auth.ok_or_else(unauthorized)?;
+    let is_feedback_admin = id.role == SERVICE_ADMIN_ROLE;
 
-    // 프로필 이미지 복원에는 eino가 필요하므로 먼저 EmployeeInfo에서 조회한다.
-    // 베스트-에포트: 조회 실패 시 프로필 이미지는 None으로 둔다.
-    let profile_image_url = match sqlx::query_scalar::<_, i32>(
-        r#"SELECT eino FROM public."EmployeeInfo" WHERE "employeeId" = $1 AND "companyCode" = $2"#,
-    )
-    .bind(&id.employee_id)
-    .bind(&id.company_code)
-    .fetch_optional(state.pg_pool.as_ref())
-    .await
-    {
-        Ok(Some(eino)) => fetch_profile_image_url(state.pg_pool.as_ref(), eino).await,
-        Ok(None) => None,
-        Err(e) => {
-            tracing::warn!(error = %e, "auth/me: EmployeeInfo 조회 실패(무시)");
-            None
+    // 서비스 관리자는 EmployeeInfo에 존재하지 않는 계정이므로 조회를 건너뛴다.
+    let profile_image_url = if is_feedback_admin {
+        None
+    } else {
+        // 프로필 이미지 복원에는 eino가 필요하므로 먼저 EmployeeInfo에서 조회한다.
+        // 베스트-에포트: 조회 실패 시 프로필 이미지는 None으로 둔다.
+        match sqlx::query_scalar::<_, i32>(
+            r#"SELECT eino FROM public."EmployeeInfo" WHERE "employeeId" = $1 AND "companyCode" = $2"#,
+        )
+        .bind(&id.employee_id)
+        .bind(&id.company_code)
+        .fetch_optional(state.pg_pool.as_ref())
+        .await
+        {
+            Ok(Some(eino)) => fetch_profile_image_url(state.pg_pool.as_ref(), eino).await,
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, "auth/me: EmployeeInfo 조회 실패(무시)");
+                None
+            }
         }
     };
 
-    let is_feedback_admin = crate::is_feedback_admin(&id.employee_id);
     Ok(Json(LoginResponse {
         employee_id: id.employee_id,
         employee_name: id.name,

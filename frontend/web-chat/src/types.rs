@@ -913,6 +913,15 @@ pub struct LoginRequest {
     pub password_encrypted: String,
 }
 
+/// 서비스 관리자 로그인 요청(`POST /auth/admin-login`). 회사코드 없음 —
+/// `EmployeeInfo`와 무관한 env 기반 별도 계정.
+#[derive(Clone, Debug, Serialize)]
+pub struct AdminLoginRequest {
+    pub admin_id: String,
+    /// RSA-OAEP(SHA-256)로 암호화한 비밀번호의 base64 문자열.
+    pub password_encrypted: String,
+}
+
 /// 게이트웨이 `GET /auth/public-key` 응답(비밀번호 암호화용 RSA 공개키 PEM).
 #[derive(Clone, Debug, Deserialize)]
 pub struct PublicKeyResponse {

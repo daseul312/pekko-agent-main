@@ -651,6 +651,7 @@ struct FeedbackCommentsResponse {
 struct CommentRow {
     /// 조치(resolve) 트리거용 키.
     feedback_key: String,
+    company_code: String,
     agent_id: String,
     rating: String,
     comment: Option<String>,
@@ -726,6 +727,9 @@ struct StatsQuery {
     /// 추세 집계 단위: day|week|month(기본값).
     #[serde(default)]
     granularity: Option<String>,
+    /// 서비스 관리자 전용: 특정 회사코드로 좁혀 본다(없으면 전체).
+    #[serde(default)]
+    company: Option<String>,
 }
 
 /// 추세 버킷 키(정렬 가능한 형태)를 생성한다: day="YYYY-MM-DD", week=ISO 주(YYYY-Www), month(기본)="YYYY-MM".
@@ -750,6 +754,9 @@ struct CommentsQuery {
     limit: Option<i64>,
     #[serde(default)]
     offset: Option<i64>,
+    /// 서비스 관리자 전용: 특정 회사코드로 좁혀 본다(없으면 전체).
+    #[serde(default)]
+    company: Option<String>,
 }
 
 /// Build the system prompt based on the selected agent.
@@ -2851,18 +2858,10 @@ fn truncate_chars(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
 
-/// 피드백 통계 조회 권한 검사. `FEEDBACK_ADMIN_IDS`(콤마분리 사원ID 목록)에 포함된
-/// 사원만 허용한다. 미설정/빈 값이면 아무도 통과하지 못한다(안전 기본값).
-fn is_feedback_admin(employee_id: &str) -> bool {
-    let id = employee_id.trim();
-    if id.is_empty() {
-        return false;
-    }
-    std::env::var("FEEDBACK_ADMIN_IDS")
-        .unwrap_or_default()
-        .split(',')
-        .map(|s| s.trim())
-        .any(|allowed| !allowed.is_empty() && allowed == id)
+/// 피드백 통계 조회 권한 검사. 회사 소속 직원 계정이 아니라, `/auth/admin-login`으로
+/// 발급된 서비스 관리자 세션(role == SERVICE_ADMIN)만 허용한다.
+fn is_feedback_admin(role: &str) -> bool {
+    role == crate::auth::SERVICE_ADMIN_ROLE
 }
 
 /// 피드백 통계 권한 검사 + 회사·기간 필터된 레코드 로드(공통).
@@ -2871,6 +2870,7 @@ async fn load_feedback_for_admin(
     state: &AppState,
     auth: Option<crate::auth::AuthIdentity>,
     period: &str,
+    company_filter: Option<&str>,
 ) -> Result<Vec<pekko_agent_memory::FeedbackRecord>, (StatusCode, Json<ErrorResponse>)> {
     let identity = auth.ok_or_else(|| {
         (
@@ -2881,7 +2881,7 @@ async fn load_feedback_for_admin(
             }),
         )
     })?;
-    if !is_feedback_admin(&identity.employee_id) {
+    if !is_feedback_admin(&identity.role) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
@@ -2903,9 +2903,16 @@ async fn load_feedback_for_admin(
         )
     })?;
 
+    let is_service_admin = identity.role == crate::auth::SERVICE_ADMIN_ROLE;
+    // 서비스 관리자(전사)는 회사 필터를 생략하고 모든 회사의 피드백을 본다.
+    // 단, `company_filter`가 주어지면(서비스 관리자가 특정 회사만 좁혀볼 때) 그 회사로 한정.
     let filtered = records
         .into_iter()
-        .filter(|r| r.company_code == identity.company_code)
+        .filter(|r| is_service_admin || r.company_code == identity.company_code)
+        .filter(|r| match company_filter {
+            Some(c) if is_service_admin && !c.is_empty() => r.company_code == c,
+            _ => true,
+        })
         .filter(|r| match cutoff {
             None => true,
             Some(c) => chrono::DateTime::parse_from_rfc3339(&r.created_at)
@@ -2931,8 +2938,18 @@ async fn get_feedback_stats(
 ) -> Result<Json<FeedbackStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
     let period = q.period.as_deref().unwrap_or("all");
     let granularity = q.granularity.as_deref().unwrap_or("month");
-    let company_code = auth.as_ref().map(|a| a.company_code.clone()).unwrap_or_default();
-    let records = load_feedback_for_admin(&state, auth, period).await?;
+    let is_service_admin = auth
+        .as_ref()
+        .map(|a| a.role == crate::auth::SERVICE_ADMIN_ROLE)
+        .unwrap_or(false);
+    let company_filter = q.company.clone().filter(|c| !c.is_empty());
+    // 조치 후 재확인 요약을 걸러낼 회사코드: 서비스 관리자가 특정 회사로 좁혔으면 그 회사,
+    // 아니면(전체 조회거나 회사 소속 계정) 로그인 계정의 회사코드.
+    let company_code = company_filter
+        .clone()
+        .unwrap_or_else(|| auth.as_ref().map(|a| a.company_code.clone()).unwrap_or_default());
+    let records =
+        load_feedback_for_admin(&state, auth, period, company_filter.as_deref()).await?;
 
     let mut total_up = 0i64;
     let mut total_down = 0i64;
@@ -3009,7 +3026,9 @@ async fn get_feedback_stats(
     let cutoff = period_cutoff(period);
     let mut resolution = ResolutionSummary::default();
     if let Ok(res_list) = state.resolution_store.list_all().await {
-        for r in res_list.into_iter().filter(|r| r.company_code == company_code) {
+        for r in res_list.into_iter().filter(|r| {
+            (is_service_admin && company_filter.is_none()) || r.company_code == company_code
+        }) {
             let in_period = match cutoff {
                 None => true,
                 Some(c) => chrono::DateTime::parse_from_rfc3339(&r.resolved_at)
@@ -3050,7 +3069,8 @@ async fn get_feedback_comments(
     let period = q.period.as_deref().unwrap_or("all");
     let limit = q.limit.unwrap_or(20).clamp(1, 100) as usize;
     let offset = q.offset.unwrap_or(0).max(0) as usize;
-    let records = load_feedback_for_admin(&state, auth, period).await?;
+    let company_filter = q.company.as_deref().filter(|c| !c.is_empty());
+    let records = load_feedback_for_admin(&state, auth, period, company_filter).await?;
 
     // 이미 발송(sent)된 조치 키 집합.
     let sent_keys: HashSet<String> = state
@@ -3075,6 +3095,7 @@ async fn get_feedback_comments(
             let resolved = sent_keys.contains(&feedback_key);
             Some(CommentRow {
                 feedback_key,
+                company_code: r.company_code,
                 agent_id: r.agent_id,
                 rating: r.rating,
                 comment: Some(comment),
@@ -3195,6 +3216,7 @@ struct ReverifyListResponse {
 #[derive(Serialize)]
 struct ReverifyRow {
     feedback_key: String,
+    company_code: String,
     agent_id: String,
     result: String,
     comment: Option<String>,
@@ -3322,7 +3344,7 @@ async fn resolve_feedback(
     Json(req): Json<FeedbackKeyRequest>,
 ) -> Result<Json<ResolutionViewResponse>, (StatusCode, Json<ErrorResponse>)> {
     // admin 게이팅 + 회사 격리된 레코드 로드.
-    let records = load_feedback_for_admin(&state, auth.clone(), "all").await?;
+    let records = load_feedback_for_admin(&state, auth.clone(), "all", None).await?;
     let admin_id = auth.as_ref().map(|a| a.employee_id.clone()).unwrap_or_default();
     let rec = records
         .iter()
@@ -3378,7 +3400,7 @@ async fn send_resolution(
     Json(req): Json<FeedbackKeyRequest>,
 ) -> Result<Json<FeedbackResponse>, (StatusCode, Json<ErrorResponse>)> {
     let identity = auth.ok_or_else(unauthorized_err)?;
-    if !is_feedback_admin(&identity.employee_id) {
+    if !is_feedback_admin(&identity.role) {
         return Err(forbidden_err());
     }
     let rec = state
@@ -4404,9 +4426,9 @@ async fn get_resolution(
                 }),
             )
         })?;
-    // 수신자 본인이거나, 같은 회사 admin만 열람.
+    // 수신자 본인이거나, 서비스 관리자만 열람(회사 무관).
     let is_owner = rec.employee_id == identity.employee_id;
-    let is_admin = is_feedback_admin(&identity.employee_id) && rec.company_code == identity.company_code;
+    let is_admin = is_feedback_admin(&identity.role);
     if !is_owner && !is_admin {
         return Err(forbidden_err());
     }
@@ -4519,13 +4541,15 @@ async fn get_reverify_list(
     Query(q): Query<CommentsQuery>,
 ) -> Result<Json<ReverifyListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let identity = auth.ok_or_else(unauthorized_err)?;
-    if !is_feedback_admin(&identity.employee_id) {
+    if !is_feedback_admin(&identity.role) {
         return Err(forbidden_err());
     }
     let period = q.period.as_deref().unwrap_or("all");
     let cutoff = period_cutoff(period);
     let limit = q.limit.unwrap_or(20).clamp(1, 100) as usize;
     let offset = q.offset.unwrap_or(0).max(0) as usize;
+    let is_service_admin = identity.role == crate::auth::SERVICE_ADMIN_ROLE;
+    let company_filter = q.company.as_deref().filter(|c| !c.is_empty());
 
     let resolutions = state
         .resolution_store
@@ -4534,7 +4558,11 @@ async fn get_reverify_list(
         .map_err(feedback_db_error)?;
     let mut rows: Vec<ReverifyRow> = resolutions
         .into_iter()
-        .filter(|r| r.company_code == identity.company_code)
+        .filter(|r| is_service_admin || r.company_code == identity.company_code)
+        .filter(|r| match company_filter {
+            Some(c) if is_service_admin => r.company_code == c,
+            _ => true,
+        })
         .filter(|r| r.reverify_result == "inaccurate")
         .filter(|r| match cutoff {
             None => true,
@@ -4544,6 +4572,7 @@ async fn get_reverify_list(
         })
         .map(|r| ReverifyRow {
             feedback_key: r.feedback_key,
+            company_code: r.company_code,
             agent_id: r.agent_id,
             result: r.reverify_result,
             comment: r.reverify_comment,
@@ -4843,6 +4872,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/public-key", get(auth::public_key_handler))
         .route("/auth/me", get(auth::me_handler))
         .route("/auth/login", post(auth::login_handler))
+        .route("/auth/admin-login", post(auth::admin_login_handler))
         .route("/auth/logout", post(auth::logout_handler))
         .route("/api/agents", get(list_agents))
         .route("/api/query", post(query_home))

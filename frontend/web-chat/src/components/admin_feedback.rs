@@ -3,7 +3,8 @@
 //!
 //! 기간 필터(이번 달/지난 3개월/전체) → KPI 4종 → 에이전트별 긍정률 / 부정 사유 도넛 →
 //! 월별 트렌드 → 최근 부정 코멘트 테이블(더 보기). 차트는 기존 `ChartBlock`을 재사용.
-//! 접근은 백엔드의 `FEEDBACK_ADMIN_IDS` 허용목록으로 게이팅된다(401/403 분기).
+//! 접근은 백엔드의 서비스 관리자 세션(`/auth/admin-login`으로 발급, role == SERVICE_ADMIN)으로
+//! 게이팅된다(401/403 분기). 401이면 일반 로그인이 아니라 서비스 관리자 로그인으로 유도해야 한다.
 
 use gloo_storage::{LocalStorage, Storage};
 use wasm_bindgen_futures::spawn_local;
@@ -361,8 +362,8 @@ pub fn admin_feedback() -> Html {
             });
             html! {
                 <div class="admin-fb-status">
-                    <p>{ "이 페이지를 보려면 로그인이 필요합니다." }</p>
-                    <button class="modal-btn" onclick={on_login}>{ "로그인하기" }</button>
+                    <p>{ "이 페이지를 보려면 서비스 관리자 로그인이 필요합니다." }</p>
+                    <button class="modal-btn" onclick={on_login}>{ "로그인 화면으로 이동" }</button>
                 </div>
             }
         }

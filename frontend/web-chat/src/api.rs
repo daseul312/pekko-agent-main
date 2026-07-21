@@ -240,6 +240,50 @@ pub async fn login(
     }
 }
 
+/// POST /auth/admin-login — 서비스(전사) 관리자 로그인. 회사코드 없이 admin_id/비밀번호만 보낸다.
+/// `EmployeeInfo`와 무관하며, 게이트웨이가 env(`SERVICE_ADMIN_ID`/`SERVICE_ADMIN_PASSWORD_HASH`)로 검증한다.
+pub async fn admin_login(admin_id: String, password: String) -> Result<AuthUser, String> {
+    let public_key_pem = fetch_public_key_pem().await?;
+    let password_encrypted = encrypt_password(&public_key_pem, &password)?;
+
+    let url = api_url("/auth/admin-login");
+    let body = AdminLoginRequest {
+        admin_id,
+        password_encrypted,
+    };
+
+    let resp = with_credentials(Request::post(&url))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .map_err(|e| format!("Serialize error: {e}"))?
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+
+    if resp.ok() {
+        let login = resp
+            .json::<LoginResponse>()
+            .await
+            .map_err(|e| format!("Parse error: {e}"))?;
+
+        Ok(AuthUser {
+            id: login.employee_id,
+            name: login.employee_name,
+            company_code: login.company_code,
+            role: login.role,
+            profile_image_url: login.profile_image_url,
+            is_feedback_admin: login.is_feedback_admin,
+        })
+    } else {
+        let err = resp
+            .json::<ErrorResponse>()
+            .await
+            .map(|e| e.error)
+            .unwrap_or_else(|_| format!("HTTP {}", resp.status()));
+        Err(err)
+    }
+}
+
 pub async fn logout() {
     let url = api_url("/auth/logout");
     let _ = with_credentials(Request::post(&url)).send().await;
