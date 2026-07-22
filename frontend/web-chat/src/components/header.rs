@@ -107,9 +107,7 @@ pub fn chat_header(props: &HeaderProps) -> Html {
             html! {
                 <button class="admin-link-btn" title="답변 피드백 통계" onclick={move |_| {
                     if let Some(w) = web_sys::window() {
-                        let loc = w.location();
-                        let _ = loc.set_hash("#/admin/feedback");
-                        let _ = loc.reload();
+                        let _ = w.location().set_href("/?admin=1#/admin/feedback");
                     }
                 }}>
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">

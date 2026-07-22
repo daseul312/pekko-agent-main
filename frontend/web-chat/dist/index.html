@@ -6,8 +6,8 @@
     <title>Core Agentic AI — EHS AI 채팅</title>
     
 <script type="module">
-import init, * as bindings from '/pekko-agent-web-chat-eeaa8c3ce19fb4d6.js';
-const wasm = await init({ module_or_path: '/pekko-agent-web-chat-eeaa8c3ce19fb4d6_bg.wasm' });
+import init, * as bindings from '/pekko-agent-web-chat-72f982098792ddee.js';
+const wasm = await init({ module_or_path: '/pekko-agent-web-chat-72f982098792ddee_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -3270,7 +3270,10 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         font-size: 13px;
         color: var(--muted);
       }
-      .admin-fb-theme-toggle {
+      .admin-fb-header-right {
+        display: flex;
+        align-items: center;
+        gap: 12px;
         margin-left: auto;
       }
       .admin-fb-main {
@@ -4603,6 +4606,36 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         color: #f97316; /* Orange sun */
       }
 
+      /* 최초 진입 시 팝업이 아니라 화면 전체를 채우는 전용 로그인 화면 */
+      .login-page {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        background: var(--bg);
+        z-index: 1000;
+      }
+      .login-page-brand {
+        display: flex;
+        align-items: center;
+      }
+      .login-page-logo {
+        font-family: var(--font-display);
+        font-size: 26px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--accent);
+      }
+      .app-boot-loading {
+        position: fixed;
+        inset: 0;
+        background: var(--bg);
+      }
+
       /* Login Modal */
       .login-modal {
         background: var(--chat-bg);
@@ -5816,7 +5849,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         });
       }
     </script>
-  <link rel="modulepreload" href="/pekko-agent-web-chat-eeaa8c3ce19fb4d6.js" crossorigin="anonymous" integrity="sha384-waTqTf0uRou9bfDVdoBujH4Zk4wgEW386NOgHyhhjX3cPZxtWcYZrA9LAtTQ1AH+"><link rel="preload" href="/pekko-agent-web-chat-eeaa8c3ce19fb4d6_bg.wasm" crossorigin="anonymous" integrity="sha384-My9YVEj9Mn8bO0FCR0q1ITKtmiBNjNbnwCLVw18MKfwjNowJyZWMTQIC1I5Qkhf7" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/pekko-agent-web-chat-72f982098792ddee.js" crossorigin="anonymous" integrity="sha384-FVKG6AJ8qG8wahL5WfOZmT0L2SMGpPBxIOYy/oAtwcgUq1XwLJgLSexORvTpRpOe"><link rel="preload" href="/pekko-agent-web-chat-72f982098792ddee_bg.wasm" crossorigin="anonymous" integrity="sha384-pYdXmMFSaWy10naCjyAk0/9coHX6X4o+PqRqwyN1XZTeCskLQDQNXFS8bVd8UY5X" as="fetch" type="application/wasm"></head>
   <body><script>"use strict";
 
 (function () {

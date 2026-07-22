@@ -524,6 +524,9 @@ impl AgentMeta {
     }
 }
 
+/// 서비스(전사) 관리자 role 값. 게이트웨이 `auth::SERVICE_ADMIN_ROLE`과 동일한 문자열이어야 한다.
+pub const SERVICE_ADMIN_ROLE: &str = "SERVICE_ADMIN";
+
 /// 표시용 로그인 사용자(실제 인증은 HttpOnly 쿠키가 보유). 새 쿠키 기반 로그인에서 사용.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AuthUser {

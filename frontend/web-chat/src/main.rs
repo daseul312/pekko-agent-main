@@ -1087,6 +1087,8 @@ fn app() -> Html {
     // 인앱 알림(헤더 종). 로그인 시 주기 폴링으로 갱신한다.
     let notifications = use_state(types::NotificationsResponse::default);
     let is_login_modal_open = use_state(|| false);
+    // 최초 /auth/me 확인이 끝났는지. 끝나기 전엔 화면 깜빡임을 막기 위해 빈 화면만 보여준다.
+    let auth_checked = use_state(|| false);
     let login_company_code = use_state(String::new);
     let login_id = use_state(String::new);
     let login_password = use_state(String::new);
@@ -1158,12 +1160,23 @@ fn app() -> Html {
     // 있으므로, 마운트 시 /auth/me를 호출해 로그인 사용자를 되살린다. 비로그인이면 아무 것도 하지 않는다.
     {
         let auth_user = auth_user.clone();
-        let is_login_modal_open = is_login_modal_open.clone();
+        let auth_checked = auth_checked.clone();
         use_effect_with((), move |_| {
             spawn_local(async move {
                 match api::fetch_me().await {
                     Ok(Some(user)) => {
+                        // 서비스 관리자는 일반 챗 화면 대신 전용 피드백 대시보드로 보낸다.
+                        if user.role == types::SERVICE_ADMIN_ROLE {
+                            if let Some(window) = web_sys::window() {
+                                // 해시만 바뀌면 브라우저가 같은 문서 내 이동으로 취급해 새로고침을
+                                // 하지 않는다(reload() 병행은 타이밍에 따라 리다이렉트 무한루프가 됨).
+                                // 쿼리스트링을 함께 바꿔 실제 페이지 이동을 강제한다.
+                                let _ = window.location().set_href("/?admin=1#/admin/feedback");
+                            }
+                            return;
+                        }
                         auth_user.set(Some(user));
+                        auth_checked.set(true);
                         // 이미 로그인 상태로 공유 복귀 경로(`?next=/share/...`)가 있으면 바로 이동.
                         if let Some(next) = pending_share_next() {
                             if let Some(window) = web_sys::window() {
@@ -1172,8 +1185,8 @@ fn app() -> Html {
                         }
                     }
                     _ => {
-                        // 비로그인이면 로그인 없이는 서비스를 이용할 수 없으므로 항상 로그인 모달을 연다.
-                        is_login_modal_open.set(true);
+                        // 비로그인이면 전용 로그인 화면을 그대로 보여준다(아래 렌더 분기).
+                        auth_checked.set(true);
                     }
                 }
             });
@@ -1391,10 +1404,21 @@ fn app() -> Html {
                 };
                 match result {
                     Ok(user) => {
-                        auth_user.set(Some(user));
                         login_error.set(None);
-                        is_login_modal_open.set(false);
                         login_password.set(String::new());
+                        // 서비스 관리자는 일반 챗 화면 대신 전용 피드백 대시보드로 보낸다.
+                        if user.role == types::SERVICE_ADMIN_ROLE {
+                            if let Some(window) = web_sys::window() {
+                                // 쿼리스트링을 함께 바꿔 실제 페이지 이동을 강제한다(해시만 바뀌면
+                                // 같은 문서 내 이동으로 취급돼 새로고침이 안 되고, reload() 병행은
+                                // 타이밍에 따라 리다이렉트 무한루프가 됨).
+                                let _ = window.location().set_href("/?admin=1#/admin/feedback");
+                            }
+                            is_logging_in.set(false);
+                            return;
+                        }
+                        auth_user.set(Some(user));
+                        is_login_modal_open.set(false);
                         // 공유 링크에서 로그인 유도로 넘어온 경우, 성공 후 원래 링크로 복귀한다.
                         if let Some(next) = pending_share_next() {
                             if let Some(window) = web_sys::window() {
@@ -2320,6 +2344,165 @@ fn app() -> Html {
         });
     }
 
+    // 로그인 폼 내용(헤더 + 입력 필드). 최초 진입 시 전용 로그인 화면, 세션 만료 등으로
+    // 앱 사용 중 재로그인이 필요할 때는 모달로 각각 재사용한다.
+    let login_form: Html = {
+        let on_company_code_input = {
+            let login_company_code = login_company_code.clone();
+            Callback::from(move |e: InputEvent| {
+                if let Some(target) = e.target() {
+                    use wasm_bindgen::JsCast;
+                    if let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() {
+                        login_company_code.set(input.value());
+                    }
+                }
+            })
+        };
+        let on_id_input = {
+            let login_id = login_id.clone();
+            Callback::from(move |e: InputEvent| {
+                if let Some(target) = e.target() {
+                    use wasm_bindgen::JsCast;
+                    if let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() {
+                        login_id.set(input.value());
+                    }
+                }
+            })
+        };
+        let on_password_input = {
+            let login_password = login_password.clone();
+            Callback::from(move |e: InputEvent| {
+                if let Some(target) = e.target() {
+                    use wasm_bindgen::JsCast;
+                    if let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() {
+                        login_password.set(input.value());
+                    }
+                }
+            })
+        };
+        let on_toggle_password = {
+            let show_password = show_password.clone();
+            Callback::from(move |_: MouseEvent| show_password.set(!*show_password))
+        };
+        let password_input_type = if *show_password { "text" } else { "password" };
+        let on_toggle_admin_mode = {
+            let is_admin_login_mode = is_admin_login_mode.clone();
+            let login_error = login_error.clone();
+            Callback::from(move |_: MouseEvent| {
+                is_admin_login_mode.set(!*is_admin_login_mode);
+                login_error.set(None);
+            })
+        };
+        let admin_mode = *is_admin_login_mode;
+
+        html! {
+            <>
+                <div class="login-header">
+                    <h3>{ if admin_mode { "서비스 관리자 로그인" } else { "로그인" } }</h3>
+                </div>
+                <div class="login-form">
+                    if !admin_mode {
+                        <div class="form-group">
+                            <label>{ "회사코드" }</label>
+                            <input
+                                type="text"
+                                value={(*login_company_code).clone()}
+                                oninput={on_company_code_input}
+                                onkeydown={on_login_keydown.clone()}
+                                autofocus=true
+                                autocomplete="off"
+                            />
+                        </div>
+                    }
+                    <div class="form-group">
+                        <label>{ "아이디" }</label>
+                        <input
+                            type="text"
+                            value={(*login_id).clone()}
+                            oninput={on_id_input}
+                            onkeydown={on_login_keydown.clone()}
+                            autocomplete="username"
+                        />
+                    </div>
+                    <div class="form-group">
+                        <label>{ "비밀번호" }</label>
+                        <div class="password-field">
+                            <input
+                                type={password_input_type}
+                                value={(*login_password).clone()}
+                                oninput={on_password_input}
+                                onkeydown={on_login_keydown.clone()}
+                                autocomplete="new-password"
+                            />
+                            <button
+                                type="button"
+                                class="password-toggle"
+                                onclick={on_toggle_password}
+                                aria-label={ if *show_password { "비밀번호 숨기기" } else { "비밀번호 표시" } }
+                                title={ if *show_password { "비밀번호 숨기기" } else { "비밀번호 표시" } }
+                            >
+                                { if *show_password {
+                                    html! {
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"></path>
+                                            <line x1="1" y1="1" x2="23" y2="23"></line>
+                                        </svg>
+                                    }
+                                } else {
+                                    html! {
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                                            <circle cx="12" cy="12" r="3"></circle>
+                                        </svg>
+                                    }
+                                }}
+                            </button>
+                        </div>
+                    </div>
+                    if let Some(err) = &*login_error {
+                        <div class="login-error-msg">{ err }</div>
+                    }
+                    <button
+                        class="login-submit-btn"
+                        disabled={*is_logging_in}
+                        onclick={on_login_submit.clone()}
+                    >
+                        if *is_logging_in {
+                            { "로그인 중..." }
+                        } else {
+                            { "로그인" }
+                        }
+                    </button>
+                    <button
+                        type="button"
+                        class="login-secondary-btn"
+                        onclick={on_toggle_admin_mode}
+                    >
+                        { if admin_mode { "일반 로그인으로 돌아가기" } else { "서비스 관리자로 로그인" } }
+                    </button>
+                </div>
+            </>
+        }
+    };
+
+    // 최초 /auth/me 확인이 끝나기 전엔 깜빡임 방지용 빈 화면만 보여준다.
+    if !*auth_checked {
+        return html! { <div class={classes!("app-boot-loading", app_class)}></div> };
+    }
+    // 비로그인 상태면 팝업이 아니라 전용 로그인 화면 전체를 보여준다.
+    if auth_user.is_none() {
+        return html! {
+            <div class={classes!("login-page", app_class)}>
+                <div class="login-page-brand">
+                    <span class="login-page-logo">{ "EHS AI" }</span>
+                </div>
+                <div class="login-modal">
+                    { login_form }
+                </div>
+            </div>
+        };
+    }
+
     html! {
         <div class={classes!("app-container", app_class, mobile_sidebar_class, collapsed_sidebar_class)}>
                 <Sidebar
@@ -2599,141 +2782,10 @@ fn app() -> Html {
                 }
             } else { html! {} } }
             { if *is_login_modal_open {
-                let on_company_code_input = {
-                    let login_company_code = login_company_code.clone();
-                    Callback::from(move |e: InputEvent| {
-                        if let Some(target) = e.target() {
-                            use wasm_bindgen::JsCast;
-                            if let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() {
-                                login_company_code.set(input.value());
-                            }
-                        }
-                    })
-                };
-                let on_id_input = {
-                    let login_id = login_id.clone();
-                    Callback::from(move |e: InputEvent| {
-                        if let Some(target) = e.target() {
-                            use wasm_bindgen::JsCast;
-                            if let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() {
-                                login_id.set(input.value());
-                            }
-                        }
-                    })
-                };
-                let on_password_input = {
-                    let login_password = login_password.clone();
-                    Callback::from(move |e: InputEvent| {
-                        if let Some(target) = e.target() {
-                            use wasm_bindgen::JsCast;
-                            if let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() {
-                                login_password.set(input.value());
-                            }
-                        }
-                    })
-                };
-                let on_toggle_password = {
-                    let show_password = show_password.clone();
-                    Callback::from(move |_: MouseEvent| show_password.set(!*show_password))
-                };
-                let password_input_type = if *show_password { "text" } else { "password" };
-                let on_toggle_admin_mode = {
-                    let is_admin_login_mode = is_admin_login_mode.clone();
-                    let login_error = login_error.clone();
-                    Callback::from(move |_: MouseEvent| {
-                        is_admin_login_mode.set(!*is_admin_login_mode);
-                        login_error.set(None);
-                    })
-                };
-                let admin_mode = *is_admin_login_mode;
-
                 html! {
                     <div class="modal-backdrop">
                         <div class="login-modal" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
-                            <div class="login-header">
-                                <h3>{ if admin_mode { "서비스 관리자 로그인" } else { "로그인" } }</h3>
-                            </div>
-                            <div class="login-form">
-                                if !admin_mode {
-                                    <div class="form-group">
-                                        <label>{ "회사코드" }</label>
-                                        <input
-                                            type="text"
-                                            value={(*login_company_code).clone()}
-                                            oninput={on_company_code_input}
-                                            onkeydown={on_login_keydown.clone()}
-                                            autofocus=true
-                                            autocomplete="off"
-                                        />
-                                    </div>
-                                }
-                                <div class="form-group">
-                                    <label>{ "아이디" }</label>
-                                    <input
-                                        type="text"
-                                        value={(*login_id).clone()}
-                                        oninput={on_id_input}
-                                        onkeydown={on_login_keydown.clone()}
-                                        autocomplete="username"
-                                    />
-                                </div>
-                                <div class="form-group">
-                                    <label>{ "비밀번호" }</label>
-                                    <div class="password-field">
-                                        <input
-                                            type={password_input_type}
-                                            value={(*login_password).clone()}
-                                            oninput={on_password_input}
-                                            onkeydown={on_login_keydown.clone()}
-                                            autocomplete="new-password"
-                                        />
-                                        <button
-                                            type="button"
-                                            class="password-toggle"
-                                            onclick={on_toggle_password}
-                                            aria-label={ if *show_password { "비밀번호 숨기기" } else { "비밀번호 표시" } }
-                                            title={ if *show_password { "비밀번호 숨기기" } else { "비밀번호 표시" } }
-                                        >
-                                            { if *show_password {
-                                                html! {
-                                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"></path>
-                                                        <line x1="1" y1="1" x2="23" y2="23"></line>
-                                                    </svg>
-                                                }
-                                            } else {
-                                                html! {
-                                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
-                                                        <circle cx="12" cy="12" r="3"></circle>
-                                                    </svg>
-                                                }
-                                            }}
-                                        </button>
-                                    </div>
-                                </div>
-                                if let Some(err) = &*login_error {
-                                    <div class="login-error-msg">{ err }</div>
-                                }
-                                <button
-                                    class="login-submit-btn"
-                                    disabled={*is_logging_in}
-                                    onclick={on_login_submit}
-                                >
-                                    if *is_logging_in {
-                                        { "로그인 중..." }
-                                    } else {
-                                        { "로그인" }
-                                    }
-                                </button>
-                                <button
-                                    type="button"
-                                    class="login-secondary-btn"
-                                    onclick={on_toggle_admin_mode}
-                                >
-                                    { if admin_mode { "일반 로그인으로 돌아가기" } else { "서비스 관리자로 로그인" } }
-                                </button>
-                            </div>
+                            { login_form }
                         </div>
                     </div>
                 }

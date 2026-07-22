@@ -3259,7 +3259,10 @@
         font-size: 13px;
         color: var(--muted);
       }
-      .admin-fb-theme-toggle {
+      .admin-fb-header-right {
+        display: flex;
+        align-items: center;
+        gap: 12px;
         margin-left: auto;
       }
       .admin-fb-main {
@@ -4590,6 +4593,36 @@
       }
       .theme-icon.sun {
         color: #f97316; /* Orange sun */
+      }
+
+      /* 최초 진입 시 팝업이 아니라 화면 전체를 채우는 전용 로그인 화면 */
+      .login-page {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        background: var(--bg);
+        z-index: 1000;
+      }
+      .login-page-brand {
+        display: flex;
+        align-items: center;
+      }
+      .login-page-logo {
+        font-family: var(--font-display);
+        font-size: 26px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--accent);
+      }
+      .app-boot-loading {
+        position: fixed;
+        inset: 0;
+        background: var(--bg);
       }
 
       /* Login Modal */

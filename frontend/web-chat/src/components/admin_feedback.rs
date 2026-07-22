@@ -230,6 +230,19 @@ pub fn admin_feedback() -> Html {
     let loading_more = use_state(|| false);
     let reverify = use_state(Vec::<ReverifyRow>::new);
     let is_dark_mode = use_state(|| LocalStorage::get::<bool>(THEME_STORAGE_KEY).unwrap_or(false));
+    // 헤더의 로그인 사용자 정보(아바타/이름/로그아웃)는 메인 챗 헤더와 동일하게 보여준다.
+    let auth_user = use_state(|| Option::<crate::types::AuthUser>::None);
+    {
+        let auth_user = auth_user.clone();
+        use_effect_with((), move |_| {
+            spawn_local(async move {
+                if let Ok(Some(user)) = api::fetch_me().await {
+                    auth_user.set(Some(user));
+                }
+            });
+            || ()
+        });
+    }
 
     // 메인 앱과 같은 저장소 키를 쓰므로, 토글 시 값을 영속화해두면 채팅 화면으로
     // 돌아갔을 때도 동일한 테마가 유지된다.
@@ -483,11 +496,16 @@ pub fn admin_feedback() -> Html {
         }
     };
 
-    // 채팅으로 돌아가기.
-    let on_back = Callback::from(move |_: MouseEvent| {
-        if let Some(window) = web_sys::window() {
-            let _ = window.location().set_href("/");
-        }
+    // 서비스 관리자 로그아웃 후 로그인 화면(메인)으로 이동.
+    let on_logout = Callback::from(move |_: MouseEvent| {
+        spawn_local(async move {
+            api::logout().await;
+            if let Some(window) = web_sys::window() {
+                // 쿼리스트링을 바꿔 실제 페이지 이동을 강제한다(reload() 병행은 타이밍에 따라
+                // 이전 해시가 남아 리다이렉트 루프가 될 수 있음).
+                let _ = window.location().set_href("/?logout=1");
+            }
+        });
     });
 
     let on_theme_toggle = {
@@ -499,36 +517,62 @@ pub fn admin_feedback() -> Html {
     html! {
         <div class={root_class}>
             <header class="admin-fb-header">
-                <button class="admin-fb-back" onclick={on_back} title="채팅으로 돌아가기">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="m15 18-6-6 6-6"></path>
-                    </svg>
-                </button>
                 <span class="admin-fb-logo">{ "EHS AI" }</span>
                 <span class="admin-fb-subtitle">{ "답변 피드백 통계" }</span>
-                <button class="theme-toggle-btn admin-fb-theme-toggle" onclick={on_theme_toggle} title={if *is_dark_mode { "라이트 모드로 변경" } else { "다크 모드로 변경" }}>
-                    { if *is_dark_mode {
+                <div class="admin-fb-header-right">
+                    <button class="theme-toggle-btn" onclick={on_theme_toggle} title={if *is_dark_mode { "라이트 모드로 변경" } else { "다크 모드로 변경" }}>
+                        { if *is_dark_mode {
+                            html! {
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="theme-icon moon">
+                                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                                </svg>
+                            }
+                        } else {
+                            html! {
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="theme-icon sun">
+                                    <circle cx="12" cy="12" r="5"></circle>
+                                    <line x1="12" y1="1" x2="12" y2="3"></line>
+                                    <line x1="12" y1="21" x2="12" y2="23"></line>
+                                    <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                                    <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                                    <line x1="1" y1="12" x2="3" y2="12"></line>
+                                    <line x1="21" y1="12" x2="23" y2="12"></line>
+                                    <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                                    <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                                </svg>
+                            }
+                        } }
+                    </button>
+                    { if let Some(user) = &*auth_user {
+                        let avatar = match &user.profile_image_url {
+                            Some(url) if !url.is_empty() => html! {
+                                <img class="user-avatar" src={url.clone()} alt="" />
+                            },
+                            _ => html! {
+                                <span class="user-avatar user-avatar-fallback">
+                                    { user.name.chars().next().unwrap_or('?').to_string() }
+                                </span>
+                            },
+                        };
                         html! {
-                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="theme-icon moon">
-                                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-                            </svg>
+                            <div class="header-auth-info">
+                                { avatar }
+                                <span class="user-welcome">
+                                    <strong>{ &user.name }</strong>
+                                    { " 님" }
+                                </span>
+                                <button class="logout-btn" onclick={on_logout}>
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                                        <polyline points="16 17 21 12 16 7"></polyline>
+                                        <line x1="21" y1="12" x2="9" y2="12"></line>
+                                    </svg>
+                                    <span>{ "로그아웃" }</span>
+                                </button>
+                            </div>
                         }
-                    } else {
-                        html! {
-                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="theme-icon sun">
-                                <circle cx="12" cy="12" r="5"></circle>
-                                <line x1="12" y1="1" x2="12" y2="3"></line>
-                                <line x1="12" y1="21" x2="12" y2="23"></line>
-                                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-                                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-                                <line x1="1" y1="12" x2="3" y2="12"></line>
-                                <line x1="21" y1="12" x2="23" y2="12"></line>
-                                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-                                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-                            </svg>
-                        }
-                    } }
-                </button>
+                    } else { html! {} } }
+                </div>
             </header>
             <main class="admin-fb-main">
                 { period_chips }
