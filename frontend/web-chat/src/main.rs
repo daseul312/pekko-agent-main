@@ -24,6 +24,8 @@ const THEME_STORAGE_KEY: &str = "pekko_theme_dark";
 
 const STORAGE_KEY: &str = "pekko_chat_sessions";
 const FAVORITES_STORAGE_KEY: &str = "pekko_favorite_questions";
+// 최초 로그인 화면 좌측 패널에 타이핑 애니메이션으로 표시되는 소개 문구.
+const LOGIN_INTRO_TEXT: &str = "EHS 업무를 도와드리는\n당신만의 전문 AI 에이전트입니다.";
 
 thread_local! {
     /// 현재 로그인 사용자에 종속된 세션 저장 키. 로그인 상태가 바뀔 때 갱신하며,
@@ -1097,6 +1099,8 @@ fn app() -> Html {
     // 서비스 관리자 로그인 모드(회사코드 입력 없이 admin_id/비밀번호만 사용).
     let is_admin_login_mode = use_state(|| false);
     let show_password = use_state(|| false);
+    // 최초 로그인 화면 좌측 소개 문구의 타이핑 애니메이션 진행 길이(글자 수). 1회만 재생.
+    let login_intro_typed_len = use_state(|| 0usize);
     let is_dark_mode = use_state(|| LocalStorage::get::<bool>(THEME_STORAGE_KEY).unwrap_or(false));
     let is_mobile_sidebar_open = use_state(|| false);
     // PC(데스크톱)에서 대화 기록 사이드바 접기/펼치기 상태. 기본값은 펼침(false).
@@ -2344,6 +2348,26 @@ fn app() -> Html {
         });
     }
 
+    // 최초 로그인 화면 좌측 소개 문구를 한 글자씩 타이핑하듯 보여준다. 1회만 재생하고 끝나면 멈춘다.
+    {
+        let login_intro_typed_len = login_intro_typed_len.clone();
+        use_effect_with((), move |_| {
+            let total_len = LOGIN_INTRO_TEXT.chars().count();
+            // Interval 콜백은 딱 한 번만 생성되므로, UseStateHandle을 역참조해 다음 값을
+            // 계산하면 매 tick마다 마운트 시점의 스냅샷(0)만 읽어 진행이 안 된다.
+            // 진행 상황은 별도의 Rc<Cell<_>>가 소유하고, 그 값을 state에 반영한다.
+            let counter = std::rc::Rc::new(std::cell::Cell::new(0usize));
+            let interval = gloo_timers::callback::Interval::new(60, move || {
+                let next = counter.get() + 1;
+                if next <= total_len {
+                    counter.set(next);
+                    login_intro_typed_len.set(next);
+                }
+            });
+            move || drop(interval)
+        });
+    }
+
     // 로그인 폼 내용(헤더 + 입력 필드). 최초 진입 시 전용 로그인 화면, 세션 만료 등으로
     // 앱 사용 중 재로그인이 필요할 때는 모달로 각각 재사용한다.
     let login_form: Html = {
@@ -2398,37 +2422,71 @@ fn app() -> Html {
         html! {
             <>
                 <div class="login-header">
-                    <h3>{ if admin_mode { "서비스 관리자 로그인" } else { "로그인" } }</h3>
+                    <div class="login-header-icon">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">
+                            <path d="M12 2L4 5v6c0 5 3.4 8.7 8 10 4.6-1.3 8-5 8-10V5l-8-3z"></path>
+                        </svg>
+                    </div>
+                    <div>
+                        <h3>{ if admin_mode { "서비스 관리자 로그인" } else { "로그인" } }</h3>
+                        <p>{ "EHS AI 시스템에 오신 것을 환영합니다" }</p>
+                    </div>
                 </div>
+                <div class="login-header-divider"></div>
                 <div class="login-form">
                     if !admin_mode {
                         <div class="form-group">
                             <label>{ "회사코드" }</label>
-                            <input
-                                type="text"
-                                value={(*login_company_code).clone()}
-                                oninput={on_company_code_input}
-                                onkeydown={on_login_keydown.clone()}
-                                autofocus=true
-                                autocomplete="off"
-                            />
+                            <div class="form-group-field">
+                                <span class="form-group-icon">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                                        <rect x="4" y="3" width="16" height="18" rx="1.5"></rect>
+                                        <path d="M8 7h2M8 11h2M8 15h2M14 7h2M14 11h2M14 15h2"></path>
+                                    </svg>
+                                </span>
+                                <input
+                                    type="text"
+                                    placeholder="회사코드를 입력하세요"
+                                    value={(*login_company_code).clone()}
+                                    oninput={on_company_code_input}
+                                    onkeydown={on_login_keydown.clone()}
+                                    autofocus=true
+                                    autocomplete="off"
+                                />
+                            </div>
                         </div>
                     }
                     <div class="form-group">
                         <label>{ "아이디" }</label>
-                        <input
-                            type="text"
-                            value={(*login_id).clone()}
-                            oninput={on_id_input}
-                            onkeydown={on_login_keydown.clone()}
-                            autocomplete="username"
-                        />
+                        <div class="form-group-field">
+                            <span class="form-group-icon">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                                    <circle cx="12" cy="8" r="3.4"></circle>
+                                    <path d="M5 20c1.2-4 4-6 7-6s5.8 2 7 6"></path>
+                                </svg>
+                            </span>
+                            <input
+                                type="text"
+                                placeholder="아이디를 입력하세요"
+                                value={(*login_id).clone()}
+                                oninput={on_id_input}
+                                onkeydown={on_login_keydown.clone()}
+                                autocomplete="username"
+                            />
+                        </div>
                     </div>
                     <div class="form-group">
                         <label>{ "비밀번호" }</label>
                         <div class="password-field">
+                            <span class="form-group-icon">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                                    <rect x="5" y="10" width="14" height="10" rx="2"></rect>
+                                    <path d="M8 10V7a4 4 0 018 0v3"></path>
+                                </svg>
+                            </span>
                             <input
                                 type={password_input_type}
+                                placeholder="비밀번호를 입력하세요"
                                 value={(*login_password).clone()}
                                 oninput={on_password_input}
                                 onkeydown={on_login_keydown.clone()}
@@ -2473,13 +2531,26 @@ fn app() -> Html {
                             { "로그인" }
                         }
                     </button>
-                    <button
-                        type="button"
-                        class="login-secondary-btn"
-                        onclick={on_toggle_admin_mode}
-                    >
-                        { if admin_mode { "일반 로그인으로 돌아가기" } else { "서비스 관리자로 로그인" } }
-                    </button>
+                    if !admin_mode {
+                        <div class="login-divider">
+                            <div class="login-divider-line"></div>
+                            <span class="login-divider-text">{ "또는" }</span>
+                            <div class="login-divider-line"></div>
+                        </div>
+                    }
+                    <div class="login-secondary-wrap">
+                        <button
+                            type="button"
+                            class="login-secondary-btn"
+                            onclick={on_toggle_admin_mode}
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                                <rect x="5" y="10" width="14" height="10" rx="2"></rect>
+                                <path d="M8 10V7a4 4 0 018 0v3"></path>
+                            </svg>
+                            { if admin_mode { "일반 로그인으로 돌아가기" } else { "서비스 관리자로 로그인" } }
+                        </button>
+                    </div>
                 </div>
             </>
         }
@@ -2489,15 +2560,38 @@ fn app() -> Html {
     if !*auth_checked {
         return html! { <div class={classes!("app-boot-loading", app_class)}></div> };
     }
-    // 비로그인 상태면 팝업이 아니라 전용 로그인 화면 전체를 보여준다.
+    // 비로그인 상태면 팝업이 아니라 전용 로그인 화면 전체를 보여준다. 좌측에는 타이핑
+    // 애니메이션으로 등장하는 소개 문구, 우측에는 기존 로그인 폼을 배치한다.
     if auth_user.is_none() {
+        let typed_len = *login_intro_typed_len;
+        let typed_text: String = LOGIN_INTRO_TEXT.chars().take(typed_len).collect();
+        let intro_done = typed_len >= LOGIN_INTRO_TEXT.chars().count();
         return html! {
             <div class={classes!("login-page", app_class)}>
-                <div class="login-page-brand">
-                    <span class="login-page-logo">{ "EHS AI" }</span>
+                <div class="login-intro-panel">
+                    <span class="login-intro-eyebrow">{ "AI SAFETY AGENT" }</span>
+                    <div class="login-page-brand">
+                        <svg class="login-page-logo-icon" xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5z"></path>
+                            <path d="m9 12 2 2 4-4"></path>
+                        </svg>
+                        <span class="login-page-logo">{ "EHS AI" }</span>
+                    </div>
+                    <p class="login-typing-text">
+                        { for typed_text.split('\n').enumerate().map(|(i, line)| html! {
+                            <>
+                                if i > 0 { <br/> }
+                                { line }
+                            </>
+                        }) }
+                        <span class={classes!("login-typing-cursor", intro_done.then_some("done"))}></span>
+                    </p>
+                    <div class="login-intro-stripe"></div>
                 </div>
-                <div class="login-modal">
-                    { login_form }
+                <div class="login-form-panel">
+                    <div class="login-modal">
+                        { login_form }
+                    </div>
                 </div>
             </div>
         };
