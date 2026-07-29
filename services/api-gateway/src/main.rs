@@ -79,6 +79,33 @@ struct QueryRequest {
     company_code: Option<String>,
 }
 
+/// `POST /api/complete` 요청. 범용 LLM 완성 — 툴·EHS 시스템 프롬프트 없이 한 번만 태운다.
+///
+/// 클라이언트(safety-admin-server)는 현재 `content` 외에 `tenant_id`/`user_id`/`company_code`
+/// 도 함께 보내지만 이 경로는 회사 스코프를 쓰지 않으므로 조용히 무시된다
+/// (`deny_unknown_fields` 없음 — 하위호환).
+#[derive(Deserialize)]
+struct CompleteRequest {
+    /// 사용자 메시지(프롬프트) 전문.
+    content: String,
+    /// 없으면 아래 기본값. 호출자가 역할을 직접 지정할 수 있다.
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    temperature: Option<f32>,
+}
+
+/// `POST /api/complete` 응답.
+#[derive(Serialize)]
+struct CompleteResponse {
+    /// LLM 출력 텍스트 그대로. **키 이름을 바꾸지 말 것** — safety-admin-server 의 세 핸들러가
+    /// `aiResult.response` 를 읽는다(`QueryResponse` 와 동일 키라 파싱 코드 무변경).
+    response: String,
+    token_usage: TokenUsage,
+}
+
 fn default_tenant() -> String {
     "default".to_string()
 }
@@ -2076,6 +2103,68 @@ async fn run_oneshot_llm(state: &AppState, request: &LlmRequest, context: &str) 
         output_tokens: resp.usage.output_tokens,
     };
     Ok((text, usage))
+}
+
+/// `/api/complete` 의 기본 시스템 프롬프트. 호출자가 `system_prompt` 를 주지 않으면 이것이 쓰인다.
+///
+/// 현재 클라이언트(위험성평가 AI 3종)는 이 필드를 보내지 않으므로 **실질적으로 이 문구가 동작을
+/// 결정한다.** 출력 형식은 사용자 프롬프트가 정하도록 두고, 여기서는 "산문/마크다운/코드펜스를
+/// 덧붙이지 말 것"만 지시한다 — `build_system_prompt` 가 JSON 요청을 덮어쓰던 문제의 정반대.
+const COMPLETE_DEFAULT_SYSTEM_PROMPT: &str = "You are a precise assistant. Follow the user's \
+output format exactly. When the user asks for JSON, return only valid JSON with no prose, \
+no markdown, and no code fences.";
+
+/// POST /api/complete — 툴·EHS 시스템 프롬프트 없이 LLM 을 한 번만 태우는 경로.
+///
+/// 서버-투-서버 전용. 구조화 출력(JSON 등)이 필요한 호출자를 위한 것이며, DB 도구·대화 저장소·
+/// 회사 스코프에 일절 닿지 않는다. `/api/agents/:id/query` 와 달리 `build_system_prompt` 를
+/// 호출하지 않는 것이 이 엔드포인트의 존재 이유다(그쪽 시스템 프롬프트는 "한국어 산문 + 마크다운
+/// 표 + ehs_query 호출"을 지시해서 "JSON만 반환" 요청과 충돌한다).
+async fn complete(
+    State(state): State<AppState>,
+    ServiceOrUserAuth(caller): ServiceOrUserAuth,
+    Json(req): Json<CompleteRequest>,
+) -> Result<Json<CompleteResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // 서비스 키 호출만 허용. 쿠키 사용자에게 열면 임의 프롬프트를 LLM 에 그대로 태우는 통로가
+    // 된다(프롬프트 인젝션·비용 남용).
+    if !matches!(caller, Caller::Service) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "서비스 호출 전용 엔드포인트입니다.".into(),
+                code: "FORBIDDEN".into(),
+            }),
+        ));
+    }
+
+    let llm_request = LlmRequest {
+        system_prompt: req
+            .system_prompt
+            .unwrap_or_else(|| COMPLETE_DEFAULT_SYSTEM_PROMPT.to_string()),
+        messages: vec![ClaudeMessage {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text { text: req.content }],
+        }],
+        // 핵심: 툴 미부착. DB 가 필요 없는 요청에 ehs_query 를 호출하려 드는 ReAct 루프를 피한다.
+        tools: vec![],
+        max_tokens: req.max_tokens.unwrap_or(4000),
+        temperature: Some(req.temperature.unwrap_or(0.1)),
+        cacheable: false,
+    };
+
+    match run_oneshot_llm(&state, &llm_request, "complete").await {
+        Ok((response, token_usage)) => Ok(Json(CompleteResponse {
+            response,
+            token_usage,
+        })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("LLM 완성 실패: {e}"),
+                code: "LLM_ERROR".into(),
+            }),
+        )),
+    }
 }
 
 /// 비-EHS 질문에 대한 고정 거부 문구 (LLM 호출 없음 = 0토큰).
@@ -4905,6 +4994,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/agents", get(list_agents))
         .route("/api/query", post(query_home))
         .route("/api/query/stream", post(query_home_stream))
+        .route("/api/complete", post(complete))
         .route("/api/agents/:agent_id/query", post(query_agent))
         .route("/api/agents/:agent_id/query/stream", post(query_agent_stream))
         .route("/api/sessions/:session_id/history", get(get_session_history))
