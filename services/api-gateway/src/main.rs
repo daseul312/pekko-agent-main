@@ -95,6 +95,10 @@ struct CompleteRequest {
     max_tokens: Option<u32>,
     #[serde(default)]
     temperature: Option<f32>,
+    /// 추론 모델의 추론 예산. "none" | "low" | "medium" | "high" | "xhigh".
+    /// 미지정이면 기존 동작(모델 기본값)을 그대로 유지한다.
+    #[serde(default)]
+    reasoning_effort: Option<String>,
 }
 
 /// `POST /api/complete` 응답.
@@ -413,6 +417,7 @@ async fn generate_query_plan(state: &AppState, content: &str) -> (Option<QueryPl
         max_tokens: 600,
         temperature: Some(0.0),
         cacheable: false,
+        reasoning_effort: None,
     };
 
     let resp = if state.llm_provider == "openai" {
@@ -1332,6 +1337,7 @@ async fn execute_agent_query(
             max_tokens: state.llm_config.max_tokens,
             temperature: Some(state.llm_config.temperature),
             cacheable: false,
+            reasoning_effort: None,
         };
 
         // Call LLM based on provider
@@ -1570,6 +1576,7 @@ async fn execute_agent_query(
             max_tokens: state.llm_config.max_tokens,
             temperature: Some(state.llm_config.temperature),
             cacheable: false,
+            reasoning_effort: None,
         };
         let resp = if state.llm_provider == "openai" {
             match &state.openai_client {
@@ -2114,6 +2121,12 @@ const COMPLETE_DEFAULT_SYSTEM_PROMPT: &str = "You are a precise assistant. Follo
 output format exactly. When the user asks for JSON, return only valid JSON with no prose, \
 no markdown, and no code fences.";
 
+/// `/api/complete` 가 받는 `reasoning_effort` 값.
+///
+/// gpt-5.5(현 `OPENAI_MODEL`) 기준 실측 확인한 집합이다. 구세대 gpt-5 의 `"minimal"` 은
+/// gpt-5.5 가 거부하므로(`unsupported_value`) 여기서도 받지 않는다 — 대신 `"none"` 을 쓴다.
+const REASONING_EFFORT_VALUES: [&str; 5] = ["none", "low", "medium", "high", "xhigh"];
+
 /// POST /api/complete — 툴·EHS 시스템 프롬프트 없이 LLM 을 한 번만 태우는 경로.
 ///
 /// 서버-투-서버 전용. 구조화 출력(JSON 등)이 필요한 호출자를 위한 것이며, DB 도구·대화 저장소·
@@ -2137,6 +2150,28 @@ async fn complete(
         ));
     }
 
+    // 오타를 OpenAI 발 400 → 불투명한 500(LLM_ERROR) 으로 감싸지 않고 여기서 바로 거부한다.
+    // 대소문자·주변 공백은 정규화해서 받아준다.
+    let reasoning_effort = match req.reasoning_effort {
+        None => None,
+        Some(raw) => {
+            let normalized = raw.trim().to_ascii_lowercase();
+            if !REASONING_EFFORT_VALUES.contains(&normalized.as_str()) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "reasoning_effort 는 {} 중 하나여야 합니다 (받은 값: {raw})",
+                            REASONING_EFFORT_VALUES.join(" | ")
+                        ),
+                        code: "INVALID_REASONING_EFFORT".into(),
+                    }),
+                ));
+            }
+            Some(normalized)
+        }
+    };
+
     let llm_request = LlmRequest {
         system_prompt: req
             .system_prompt
@@ -2150,7 +2185,14 @@ async fn complete(
         max_tokens: req.max_tokens.unwrap_or(4000),
         temperature: Some(req.temperature.unwrap_or(0.1)),
         cacheable: false,
+        reasoning_effort,
     };
+
+    info!(
+        effort = ?llm_request.reasoning_effort,
+        max_tokens = llm_request.max_tokens,
+        "/api/complete 호출"
+    );
 
     match run_oneshot_llm(&state, &llm_request, "complete").await {
         Ok((response, token_usage)) => Ok(Json(CompleteResponse {
@@ -2215,6 +2257,7 @@ async fn determine_routing_decision(
         max_tokens: 2000,
         temperature: Some(0.1),
         cacheable: false,
+        reasoning_effort: None,
     };
 
     match run_oneshot_llm(state, &llm_request, "smart routing").await {
@@ -2324,6 +2367,7 @@ async fn compose_multi_agent_response(
         max_tokens: 4000,
         temperature: Some(0.2),
         cacheable: false,
+        reasoning_effort: None,
     };
 
     match run_oneshot_llm(state, &llm_request, "multi-agent synthesis").await {
@@ -2700,6 +2744,7 @@ async fn summarize_session(
         max_tokens: 100,
         temperature: Some(0.3),
         cacheable: false,
+        reasoning_effort: None,
     };
 
     let resp = if state.llm_provider == "openai" {

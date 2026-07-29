@@ -76,6 +76,12 @@ pub struct LlmRequest {
     pub max_tokens: u32,
     pub temperature: Option<f32>,
     pub cacheable: bool,
+    /// 추론 모델(gpt-5.x, o-series)의 추론 예산. 허용값은 모델마다 다르다
+    /// (gpt-5.5: `none|low|medium|high|xhigh`, 구세대 gpt-5: `minimal|low|medium|high`).
+    /// 값 검증은 호출자(`/api/complete`)가 하고, 여기서는 문자열을 그대로 전달만 한다.
+    /// `None` 이면 파라미터를 아예 보내지 않아 모델 기본값이 그대로 쓰인다.
+    /// Claude 경로에서는 무시된다 — Anthropic 에 대응 파라미터가 없다.
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone)]

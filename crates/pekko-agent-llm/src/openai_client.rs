@@ -24,6 +24,13 @@ fn model_locks_temperature(model: &str) -> bool {
     m.starts_with("gpt-5") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
 }
 
+/// `reasoning_effort` 를 받는 모델인지. gpt-5.x 계열과 o-series 만 지원하며,
+/// gpt-4o 같은 비추론 모델에 보내면 400 이 난다.
+fn model_supports_reasoning_effort(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.starts_with("gpt-5") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
+}
+
 #[derive(Serialize)]
 struct OpenAIRequest {
     model: String,
@@ -36,6 +43,10 @@ struct OpenAIRequest {
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    // 추론 모델(gpt-5.x, o-series)의 추론 예산. 값이 없으면 필드 자체를 보내지 않아
+    // 모델 기본값이 그대로 쓰인다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -219,12 +230,21 @@ impl OpenAIClient {
             request.temperature
         };
 
+        // 비추론 모델은 이 파라미터를 거부하므로, 요청이 왔더라도 조용히 뺀다
+        // (temperature 와 동일한 처리).
+        let reasoning_effort = if model_supports_reasoning_effort(&self.model) {
+            request.reasoning_effort.clone()
+        } else {
+            None
+        };
+
         let openai_req = OpenAIRequest {
             model: self.model.clone(),
             messages,
             tools,
             max_tokens: request.max_tokens,
             temperature,
+            reasoning_effort,
         };
 
         let resp = self.client
