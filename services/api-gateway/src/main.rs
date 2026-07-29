@@ -26,7 +26,7 @@ use pekko_agent_security::{RbacManager, TenantManager, AuditLogger};
 use sqlx::PgPool;
 
 mod auth;
-use auth::{AuthIdentity, OptionalAuth, RequireAuth};
+use auth::{AuthIdentity, Caller, OptionalAuth, ServiceOrUserAuth};
 
 
 /// Shared application state with all services
@@ -73,6 +73,10 @@ struct QueryRequest {
     tenant_id: String,
     #[serde(default = "default_user")]
     user_id: String,
+    /// 서비스 키로 인증된 서버 호출이 대신 주장하는 회사코드. 쿠키 세션 호출에서는
+    /// 무시되며(신원은 JWT에서 옴), 서비스 호출에서만 신원 스코프로 쓰인다.
+    #[serde(default)]
+    company_code: Option<String>,
 }
 
 fn default_tenant() -> String {
@@ -1010,12 +1014,15 @@ async fn list_agents(State(state): State<AppState>) -> impl IntoResponse {
 async fn query_agent(
     Path(agent_id): Path<String>,
     State(state): State<AppState>,
-    RequireAuth(auth): RequireAuth,
+    ServiceOrUserAuth(caller): ServiceOrUserAuth,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
     let noop = |_: ProcessEvent| {};
-    let auth = Some(auth);
+    let auth = Some(match caller {
+        Caller::User(id) => id,
+        Caller::Service => auth::service_identity(&req.user_id, req.company_code.as_deref()),
+    });
     run_agent_query_pipeline(&state, &agent_id, &req, session_id, &noop, false, &auth)
         .await
         .map(Json)
@@ -1026,13 +1033,17 @@ async fn query_agent(
 async fn query_agent_stream(
     Path(agent_id): Path<String>,
     State(state): State<AppState>,
-    RequireAuth(auth): RequireAuth,
+    ServiceOrUserAuth(caller): ServiceOrUserAuth,
     Json(req): Json<QueryRequest>,
 ) -> axum::response::Response {
     use axum::body::{Body, Bytes};
     use tokio_stream::wrappers::UnboundedReceiverStream;
 
-    let auth = Some(auth);
+    // `req`는 아래 spawn으로 move 되므로, 신원은 반드시 그 전에 만든다.
+    let auth = Some(match caller {
+        Caller::User(id) => id,
+        Caller::Service => auth::service_identity(&req.user_id, req.company_code.as_deref()),
+    });
     let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
     let (tx, rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<Bytes, std::convert::Infallible>>();
@@ -1399,9 +1410,10 @@ async fn execute_agent_query(
             ));
 
             // Execute each tool and collect results.
-            // When logged in, carry the verified identity (from the JWT cookie, not the
-            // request body) into the tool context so tools / future row-level guards can
-            // scope to the employee.
+            // Carry the caller identity into the tool context so tools / future row-level
+            // guards can scope to the employee. The identity is either a verified JWT
+            // cookie session, or — for `x-service-key` server-to-server calls — the scope
+            // asserted by the trusted caller in the request body.
             let mut tool_results: Vec<ContentBlock> = Vec::new();
             let mut credentials = HashMap::new();
             if let Some(id) = auth {
@@ -2243,12 +2255,15 @@ async fn compose_multi_agent_response(
 /// POST /api/query - Smart-route a query to one or more agents when no agent is selected.
 async fn query_home(
     State(state): State<AppState>,
-    RequireAuth(auth): RequireAuth,
+    ServiceOrUserAuth(caller): ServiceOrUserAuth,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
     let noop = |_: ProcessEvent| {};
-    let auth = Some(auth);
+    let auth = Some(match caller {
+        Caller::User(id) => id,
+        Caller::Service => auth::service_identity(&req.user_id, req.company_code.as_deref()),
+    });
     run_query_pipeline(&state, &req, session_id, &noop, false, &auth)
         .await
         .map(Json)
@@ -2259,13 +2274,17 @@ async fn query_home(
 /// the live processing steps. The terminal line is `{"type":"final", ...QueryResponse}`.
 async fn query_home_stream(
     State(state): State<AppState>,
-    RequireAuth(auth): RequireAuth,
+    ServiceOrUserAuth(caller): ServiceOrUserAuth,
     Json(req): Json<QueryRequest>,
 ) -> axum::response::Response {
     use axum::body::{Body, Bytes};
     use tokio_stream::wrappers::UnboundedReceiverStream;
 
-    let auth = Some(auth);
+    // `req`는 아래 spawn으로 move 되므로, 신원은 반드시 그 전에 만든다.
+    let auth = Some(match caller {
+        Caller::User(id) => id,
+        Caller::Service => auth::service_identity(&req.user_id, req.company_code.as_deref()),
+    });
     let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
     let (tx, rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<Bytes, std::convert::Infallible>>();
@@ -3306,6 +3325,8 @@ async fn regenerate_improved_answer(
         session_id: Some(new_session),
         tenant_id: default_tenant(),
         user_id: rec.employee_id.clone(),
+        // 신원(`identity`)을 위에서 직접 만들어 넘기므로 바디의 회사코드는 쓰이지 않는다.
+        company_code: None,
     };
     // [중요] execute_agent_query는 LLM 메시지를 대화 히스토리에서만 만든다. 정상 경로처럼
     // 질문을 throwaway 세션에 먼저 저장하지 않으면 messages가 비어 LLM이 일반 인사말만
@@ -4829,6 +4850,13 @@ async fn main() -> anyhow::Result<()> {
         _ => llm_config.model.clone(),
     };
     info!(provider = %llm_provider, model = %active_model, "LLM provider selected");
+
+    // 서버-투-서버 서비스 키 상태. 키 값 자체는 절대 로그에 남기지 않고 길이만 보고한다.
+    match std::env::var("SERVICE_API_KEY").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        Some(k) if k.len() >= 32 => info!("서비스 키 인증 활성화(x-service-key, len={})", k.len()),
+        Some(k) => warn!("SERVICE_API_KEY 가 너무 짧습니다(len={}) — 32자 이상 권장", k.len()),
+        None => info!("SERVICE_API_KEY 미설정 — 서비스 키 인증 비활성(쿠키만 허용)"),
+    }
 
     // Create OpenAI client if API key available
     let openai_client = std::env::var("OPENAI_API_KEY").ok().map(|key| {

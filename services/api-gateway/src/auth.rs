@@ -417,6 +417,10 @@ impl<S: Send + Sync> FromRequestParts<S> for OptionalAuth {
 
 /// 요청 쿠키에서 로그인 신원을 추출하는 추출기. 쿠키가 없거나 토큰이 무효하면
 /// 401 Unauthorized로 거부한다(로그인 필수 엔드포인트용).
+///
+/// 현재 라우트는 모두 `ServiceOrUserAuth`(쿠키 또는 서비스 키)를 쓰지만, 서버 호출을
+/// 허용하면 안 되는 "쿠키 전용" 엔드포인트를 위해 남겨 둔다.
+#[allow(dead_code)]
 pub struct RequireAuth(pub AuthIdentity);
 
 #[axum::async_trait]
@@ -434,5 +438,94 @@ impl<S: Send + Sync> FromRequestParts<S> for RequireAuth {
                 Json(serde_json::json!({ "error": "로그인이 필요합니다." })),
             )
         })
+    }
+}
+
+/// 서버-투-서버 호출이 서비스 키를 싣는 헤더 이름.
+/// 브라우저는 이 헤더를 보내지 않는다 — CORS `allow_headers`에 절대 추가하지 말 것.
+pub const SERVICE_KEY_HEADER: &str = "x-service-key";
+/// 서비스 키로 인증된 호출의 role. `SERVICE_ADMIN_ROLE`("SERVICE_ADMIN")과 **다른 값**이라
+/// 관리자/피드백 라우트는 열리지 않는다.
+pub const SERVICE_ROLE: &str = "SERVICE";
+/// 서비스 호출 신원의 명목 만료 시간(초). 쿠키 세션과 달리 실제로 검증되는 값은 아니고,
+/// `/auth/me` 형태와 맞추기 위한 필드값이다.
+const SERVICE_SESSION_SECS: i64 = 300;
+
+/// `SERVICE_API_KEY`. 미설정/공백이면 `None` → 서비스 키 경로 자체가 비활성(기존 401 유지).
+fn service_api_key() -> Option<String> {
+    std::env::var("SERVICE_API_KEY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 상수시간 비교(early-return 없음) — 키 비교로 길이/내용을 추측당하지 않게 한다.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// 서비스 호출의 신원. `company_code` / `user_id`는 **요청 바디**에서 온다 — 즉 키를 가진
+/// 호출자는 임의 회사를 주장할 수 있다. 호출자(safety-admin-server)가 자체 JWT로 이미 검증한
+/// 값을 넘기는 신뢰된 서버-투-서버 전제에서만 유효하다.
+pub fn service_identity(user_id: &str, company_code: Option<&str>) -> AuthIdentity {
+    let employee_id = match user_id.trim() {
+        "" | "anonymous" => "service".to_string(),
+        v => v.to_string(),
+    };
+    AuthIdentity {
+        employee_id,
+        company_code: company_code.unwrap_or("").trim().to_string(),
+        role: SERVICE_ROLE.to_string(),
+        name: "service".to_string(),
+        exp: chrono::Utc::now().timestamp() + SERVICE_SESSION_SECS,
+    }
+}
+
+/// `ServiceOrUserAuth`가 판별한 호출 주체.
+pub enum Caller {
+    /// 쿠키 세션으로 인증된 브라우저 사용자(검증된 신원).
+    User(AuthIdentity),
+    /// 서비스 키로 인증된 서버 호출. 신원은 핸들러가 바디에서 만든다
+    /// (추출기는 바디보다 먼저 실행되므로 여기서는 알 수 없다).
+    Service,
+}
+
+/// 쿠키(브라우저) **또는** `x-service-key`(서버) 중 하나를 요구한다.
+/// 둘 다 없으면 `RequireAuth`와 동일한 401 바디를 반환한다(응답 형태 불변).
+pub struct ServiceOrUserAuth(pub Caller);
+
+#[axum::async_trait]
+impl<S: Send + Sync> FromRequestParts<S> for ServiceOrUserAuth {
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        // 1) 기존 쿠키 세션 우선 — 브라우저 경로는 완전히 동일하게 동작한다.
+        let jar = CookieJar::from_request_parts(parts, state)
+            .await
+            .unwrap_or_default();
+        if let Some(id) = jar.get(COOKIE_NAME).and_then(|c| verify_token(c.value())) {
+            return Ok(ServiceOrUserAuth(Caller::User(id)));
+        }
+        // 2) 서비스 키. `SERVICE_API_KEY` 미설정이면 이 분기가 통째로 비활성 → 아래 401.
+        if let (Some(expected), Some(got)) = (
+            service_api_key(),
+            parts.headers.get(SERVICE_KEY_HEADER).and_then(|v| v.to_str().ok()),
+        ) {
+            if ct_eq(expected.as_bytes(), got.trim().as_bytes()) {
+                return Ok(ServiceOrUserAuth(Caller::Service));
+            }
+            tracing::warn!("서비스 키 불일치 — 401");
+        }
+        Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "로그인이 필요합니다." })),
+        ))
     }
 }
